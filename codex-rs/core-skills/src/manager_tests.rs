@@ -68,6 +68,7 @@ fn test_skill(name: &str, path: PathBuf) -> SkillMetadata {
             .expect("skill path should canonicalize"),
         scope: SkillScope::User,
         plugin_id: None,
+        plugin_display_name: None,
     }
 }
 
@@ -153,6 +154,7 @@ async fn skills_for_config_with_stack(
             .map(|path| PluginSkillRoot {
                 path,
                 plugin_id: "test-plugin@test".to_string(),
+                plugin_display_name: "Test Plugin".to_string(),
             })
             .collect(),
         config_layer_stack.clone(),

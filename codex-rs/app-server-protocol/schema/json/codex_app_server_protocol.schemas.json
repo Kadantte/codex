@@ -14646,6 +14646,17 @@
           "path": {
             "$ref": "#/definitions/v2/AbsolutePathBuf"
           },
+          "plugin": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/SkillOwnerPlugin"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Plugin that owns this skill, when the skill is contributed by a plugin."
+          },
           "scope": {
             "$ref": "#/definitions/v2/SkillScope"
           },
@@ -14663,6 +14674,21 @@
           "name",
           "path",
           "scope"
+        ],
+        "type": "object"
+      },
+      "SkillOwnerPlugin": {
+        "properties": {
+          "displayName": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "displayName",
+          "id"
         ],
         "type": "object"
       },

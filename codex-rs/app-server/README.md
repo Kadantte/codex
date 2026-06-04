@@ -1492,6 +1492,7 @@ $skill-creator Add a new skill for triaging flaky CI and include step-by-step us
 Use `skills/list` to fetch the available skills (optionally scoped by `cwds`, with `forceReload`).
 `skills/list` might reuse a cached skills result per `cwd`; setting `forceReload` to `true` refreshes the result from disk.
 The server also emits `skills/changed` notifications when watched local skill files change. Treat this as an invalidation signal and re-run `skills/list` with your current params when needed.
+Plugin-owned skills include a `plugin` owner object when the server can determine ownership. Clients should prefer this metadata over inferring ownership from skill paths.
 
 ```json
 { "method": "skills/list", "id": 25, "params": {
@@ -1519,6 +1520,17 @@ The server also emits `skills/changed` notifications when watched local skill fi
         "errors": []
     }]
 } }
+```
+
+For plugin-owned skill entries, the skill object also includes the owning plugin:
+
+```json
+{
+  "plugin": {
+    "id": "linear@chatgpt-global",
+    "displayName": "Linear"
+  }
+}
 ```
 
 ```json

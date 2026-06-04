@@ -1,4 +1,5 @@
 use crate::OPENAI_CURATED_MARKETPLACE_NAME;
+use crate::manifest::PluginManifest;
 use crate::manifest::PluginManifestHooks;
 use crate::manifest::PluginManifestPaths;
 use crate::manifest::load_plugin_manifest;
@@ -557,19 +558,14 @@ async fn load_plugin(
     };
 
     let manifest_paths = &manifest.paths;
-    loaded_plugin.manifest_name = manifest
-        .interface
-        .as_ref()
-        .and_then(|interface| interface.display_name.as_deref())
-        .map(str::trim)
-        .filter(|display_name| !display_name.is_empty())
-        .map(str::to_string)
-        .or_else(|| Some(manifest.name.clone()));
+    let plugin_display_name = plugin_manifest_display_name(&manifest);
+    loaded_plugin.manifest_name = Some(plugin_display_name.clone());
     loaded_plugin.manifest_description = manifest.description.clone();
     loaded_plugin.skill_roots = plugin_skill_roots(&plugin_root, manifest_paths);
     let resolved_skills = load_plugin_skills(
         &plugin_root,
         &loaded_plugin_id,
+        &plugin_display_name,
         manifest_paths,
         restriction_product,
         skill_config_rules,
@@ -649,6 +645,7 @@ impl ResolvedPluginSkills {
 pub async fn load_plugin_skills(
     plugin_root: &AbsolutePathBuf,
     plugin_id: &PluginId,
+    plugin_display_name: &str,
     manifest_paths: &PluginManifestPaths,
     restriction_product: Option<Product>,
     skill_config_rules: &SkillConfigRules,
@@ -660,6 +657,7 @@ pub async fn load_plugin_skills(
             scope: SkillScope::User,
             file_system: Arc::clone(&LOCAL_FS),
             plugin_id: Some(plugin_id.as_key()),
+            plugin_display_name: Some(plugin_display_name.to_string()),
         })
         .collect::<Vec<_>>();
     let outcome = load_skills_from_roots(roots).await;
@@ -676,6 +674,17 @@ pub async fn load_plugin_skills(
         disabled_skill_paths,
         had_errors,
     }
+}
+
+pub(crate) fn plugin_manifest_display_name(manifest: &PluginManifest) -> String {
+    manifest
+        .interface
+        .as_ref()
+        .and_then(|interface| interface.display_name.as_deref())
+        .map(str::trim)
+        .filter(|display_name| !display_name.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| manifest.name.clone())
 }
 
 fn plugin_skill_roots(

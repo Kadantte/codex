@@ -154,6 +154,7 @@ pub struct SkillRoot {
     pub scope: SkillScope,
     pub file_system: Arc<dyn ExecutorFileSystem>,
     pub plugin_id: Option<String>,
+    pub plugin_display_name: Option<String>,
 }
 
 pub async fn load_skills_from_roots<I>(roots: I) -> SkillLoadOutcome
@@ -174,6 +175,7 @@ where
             &root_path,
             root.scope,
             root.plugin_id.as_deref(),
+            root.plugin_display_name.as_deref(),
             &mut outcome,
         )
         .await;
@@ -258,6 +260,7 @@ async fn skill_roots_with_home_dir(
         scope: SkillScope::User,
         file_system: Arc::clone(&LOCAL_FS),
         plugin_id: Some(root.plugin_id),
+        plugin_display_name: Some(root.plugin_display_name),
     }));
     roots.extend(repo_agents_skill_roots(fs, config_layer_stack, cwd).await);
     dedupe_skill_roots_by_path(&mut roots);
@@ -287,6 +290,7 @@ fn skill_roots_from_layer_stack_inner(
                         scope: SkillScope::Repo,
                         file_system: Arc::clone(repo_fs),
                         plugin_id: None,
+                        plugin_display_name: None,
                     });
                 }
             }
@@ -298,6 +302,7 @@ fn skill_roots_from_layer_stack_inner(
                     scope: SkillScope::User,
                     file_system: Arc::clone(&LOCAL_FS),
                     plugin_id: None,
+                    plugin_display_name: None,
                 });
 
                 // `$HOME/.agents/skills` (user-installed skills).
@@ -307,6 +312,7 @@ fn skill_roots_from_layer_stack_inner(
                         scope: SkillScope::User,
                         file_system: Arc::clone(&LOCAL_FS),
                         plugin_id: None,
+                        plugin_display_name: None,
                     });
                 }
 
@@ -317,6 +323,7 @@ fn skill_roots_from_layer_stack_inner(
                     scope: SkillScope::System,
                     file_system: Arc::clone(&LOCAL_FS),
                     plugin_id: None,
+                    plugin_display_name: None,
                 });
             }
             ConfigLayerSource::System { .. } => {
@@ -327,6 +334,7 @@ fn skill_roots_from_layer_stack_inner(
                     scope: SkillScope::Admin,
                     file_system: Arc::clone(&LOCAL_FS),
                     plugin_id: None,
+                    plugin_display_name: None,
                 });
             }
             ConfigLayerSource::Mdm { .. }
@@ -359,6 +367,7 @@ async fn repo_agents_skill_roots(
                 scope: SkillScope::Repo,
                 file_system: Arc::clone(&fs),
                 plugin_id: None,
+                plugin_display_name: None,
             }),
             Ok(_) => {}
             Err(err) if err.kind() == io::ErrorKind::NotFound => {}
@@ -458,6 +467,7 @@ async fn discover_skills_under_root(
     root: &AbsolutePathBuf,
     scope: SkillScope,
     plugin_id: Option<&str>,
+    plugin_display_name: Option<&str>,
     outcome: &mut SkillLoadOutcome,
 ) {
     let root = canonicalize_for_skill_identity(root);
@@ -570,7 +580,7 @@ async fn discover_skills_under_root(
             }
 
             if metadata.is_file && file_name == SKILLS_FILENAME {
-                match parse_skill_file(fs, &path, scope, plugin_id).await {
+                match parse_skill_file(fs, &path, scope, plugin_id, plugin_display_name).await {
                     Ok(skill) => {
                         outcome.skills.push(skill);
                     }
@@ -601,6 +611,7 @@ async fn parse_skill_file(
     path: &AbsolutePathBuf,
     scope: SkillScope,
     plugin_id: Option<&str>,
+    plugin_display_name: Option<&str>,
 ) -> Result<SkillMetadata, SkillParseError> {
     let contents = fs
         .read_file_text(path, /*sandbox*/ None)
@@ -658,6 +669,7 @@ async fn parse_skill_file(
         path_to_skills_md: resolved_path,
         scope,
         plugin_id: plugin_id.map(str::to_string),
+        plugin_display_name: plugin_display_name.map(str::to_string),
     })
 }
 

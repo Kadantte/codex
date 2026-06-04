@@ -6308,6 +6308,7 @@ async fn build_initial_context_trims_skill_metadata_from_context_window_budget()
             path_to_skills_md: test_path_buf("/tmp/admin-skill/SKILL.md").abs(),
             scope: SkillScope::Admin,
             plugin_id: None,
+            plugin_display_name: None,
         },
         SkillMetadata {
             name: "repo-skill".to_string(),
@@ -6319,6 +6320,7 @@ async fn build_initial_context_trims_skill_metadata_from_context_window_budget()
             path_to_skills_md: test_path_buf("/tmp/repo-skill/SKILL.md").abs(),
             scope: SkillScope::Repo,
             plugin_id: None,
+            plugin_display_name: None,
         },
     ];
     turn_context.model_info.context_window = Some(100);
@@ -6355,6 +6357,7 @@ fn emit_thread_start_skill_metrics_records_enabled_kept_and_truncated_values() {
         path_to_skills_md: test_path_buf("/tmp/repo-skill/SKILL.md").abs(),
         scope: SkillScope::Repo,
         plugin_id: None,
+        plugin_display_name: None,
     }];
     let rendered = build_available_skills(
         &outcome,
@@ -6400,6 +6403,7 @@ fn emit_thread_start_skill_metrics_records_description_truncated_chars_without_o
         path_to_skills_md: test_path_buf("/tmp/alpha-skill/SKILL.md").abs(),
         scope: SkillScope::Repo,
         plugin_id: None,
+        plugin_display_name: None,
     };
     let beta = SkillMetadata {
         name: "beta-skill".to_string(),
@@ -6411,6 +6415,7 @@ fn emit_thread_start_skill_metrics_records_description_truncated_chars_without_o
         path_to_skills_md: test_path_buf("/tmp/beta-skill/SKILL.md").abs(),
         scope: SkillScope::Repo,
         plugin_id: None,
+        plugin_display_name: None,
     };
     let minimum_skill_line_cost = |skill: &SkillMetadata| {
         let path = skill.path_to_skills_md.to_string_lossy().replace('\\', "/");
@@ -6459,6 +6464,7 @@ async fn build_initial_context_emits_thread_start_skill_warning_on_repeated_buil
             path_to_skills_md: test_path_buf("/tmp/admin-skill/SKILL.md").abs(),
             scope: SkillScope::Admin,
             plugin_id: None,
+            plugin_display_name: None,
         },
         SkillMetadata {
             name: "repo-skill".to_string(),
@@ -6470,6 +6476,7 @@ async fn build_initial_context_emits_thread_start_skill_warning_on_repeated_buil
             path_to_skills_md: test_path_buf("/tmp/repo-skill/SKILL.md").abs(),
             scope: SkillScope::Repo,
             plugin_id: None,
+            plugin_display_name: None,
         },
     ];
     turn_context.model_info.context_window = Some(100);

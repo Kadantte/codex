@@ -1190,6 +1190,9 @@ impl PickerState {
             }
             _ if self.list_keymap.accept.is_pressed(key) => {
                 if self.fast_initial_page_loaded {
+                    self.inline_error =
+                        Some(String::from("Wait for session verification to finish"));
+                    self.request_frame();
                     return Ok(None);
                 }
                 if let Some(row) = self.filtered_rows.get(self.selected) {
@@ -2352,13 +2355,23 @@ fn footer_hint_lines(state: &PickerState, width: u16) -> Vec<Line<'static>> {
         SessionListDensity::Comfortable => "dense",
         SessionListDensity::Dense => "comfy",
     };
-    let first_row_hints = vec![
+    let primary_hint = if state.fast_initial_page_loaded {
+        PickerFooterHint {
+            key: "verifying",
+            wide_label: String::from("sessions"),
+            compact_label: String::from("sessions"),
+            priority: 0,
+        }
+    } else {
         PickerFooterHint {
             key: "enter",
             wide_label: action_label.to_string(),
             compact_label: action_label.to_string(),
             priority: 0,
-        },
+        }
+    };
+    let first_row_hints = vec![
+        primary_hint,
         PickerFooterHint {
             key: "esc",
             wide_label: esc_label.to_string(),
@@ -6143,7 +6156,7 @@ session_picker_view = "dense"
     }
 
     #[tokio::test]
-    async fn enter_does_not_accept_provisional_state_db_row() {
+    async fn provisional_state_db_row_disables_accept_with_feedback() {
         let loader = page_only_loader(|_| {});
         let mut state = PickerState::new(
             FrameRequester::test_dummy(),
@@ -6173,6 +6186,32 @@ session_picker_view = "dense"
             .expect("enter should not abort the picker");
 
         assert!(selection.is_none());
+        assert_eq!(
+            state.inline_error,
+            Some(String::from("Wait for session verification to finish"))
+        );
+        let footer = footer_lines_text(&state, /*width*/ 220);
+        assert!(footer.contains("verifying sessions"));
+        assert!(!footer.contains("enter resume"));
+    }
+
+    #[test]
+    fn hint_line_snapshot_shows_session_verification() {
+        let loader = page_only_loader(|_| {});
+        let mut state = PickerState::new(
+            FrameRequester::test_dummy(),
+            loader,
+            ProviderFilter::MatchDefault(String::from("openai")),
+            /*show_all*/ true,
+            /*filter_cwd*/ None,
+            SessionPickerAction::Resume,
+        );
+        state.fast_initial_page_loaded = true;
+
+        assert_snapshot!(
+            "resume_picker_footer_verifying",
+            footer_snapshot(&state, /*width*/ 220, /*list_height*/ 20)
+        );
     }
 
     #[test]

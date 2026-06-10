@@ -1715,10 +1715,9 @@ impl PickerState {
     }
 
     fn replace_with_page(&mut self, page: PickerPage) {
-        let selected_key = self
-            .filtered_rows
-            .get(self.selected)
-            .and_then(Row::seen_key);
+        let selected_row = self.filtered_rows.get(self.selected);
+        let selected_thread_id = selected_row.and_then(|row| row.thread_id);
+        let selected_key = selected_row.and_then(Row::seen_key);
         let selected_index = self.selected;
 
         self.pagination.next_cursor = page.next_cursor;
@@ -1740,11 +1739,18 @@ impl PickerState {
         }
 
         self.apply_filter();
-        self.selected = selected_key
-            .and_then(|selected_key| {
+        self.selected = selected_thread_id
+            .and_then(|selected_thread_id| {
                 self.filtered_rows
                     .iter()
-                    .position(|row| row.seen_key().as_ref() == Some(&selected_key))
+                    .position(|row| row.thread_id == Some(selected_thread_id))
+            })
+            .or_else(|| {
+                selected_key.and_then(|selected_key| {
+                    self.filtered_rows
+                        .iter()
+                        .position(|row| row.seen_key().as_ref() == Some(&selected_key))
+                })
             })
             .unwrap_or_else(|| selected_index.min(self.filtered_rows.len().saturating_sub(1)));
         self.ensure_selected_visible();
@@ -4072,12 +4078,19 @@ mod tests {
     #[tokio::test]
     async fn local_picker_reconciles_fast_page_and_preserves_selection() {
         let (mut state, recorded_requests) = reconciling_picker_state();
+        let first_thread_id = ThreadId::new();
+        let selected_thread_id = ThreadId::new();
+        let replacement_thread_id = ThreadId::new();
 
         state.start_initial_load();
 
         let request = recorded_requests.lock().unwrap()[0].clone();
         assert_eq!(request.lookup_mode, ThreadListLookupMode::StateDbOnly);
         assert!(request.reconcile_after_load);
+        let mut first_row = make_row("/tmp/a.jsonl", "2025-01-03T00:00:00Z", "a");
+        first_row.thread_id = Some(first_thread_id);
+        let mut selected_row = make_row("/tmp/stale-b.jsonl", "2025-01-02T00:00:00Z", "b");
+        selected_row.thread_id = Some(selected_thread_id);
 
         state
             .handle_background_event(BackgroundEvent::Page {
@@ -4085,10 +4098,7 @@ mod tests {
                 search_token: request.search_token,
                 phase: PageLoadPhase::Fast,
                 page: Ok(page(
-                    vec![
-                        make_row("/tmp/a.jsonl", "2025-01-03T00:00:00Z", "a"),
-                        make_row("/tmp/b.jsonl", "2025-01-02T00:00:00Z", "b"),
-                    ],
+                    vec![first_row, selected_row],
                     Some("db-cursor"),
                     /*num_scanned_files*/ 2,
                     /*reached_scan_cap*/ false,
@@ -4101,6 +4111,14 @@ mod tests {
         state.selected = 1;
         state.load_more_if_needed(LoadTrigger::Scroll);
         assert_eq!(recorded_requests.lock().unwrap().len(), 1);
+        let mut repaired_selected_row = make_row(
+            "/tmp/repaired-b.jsonl",
+            "2025-01-02T00:00:00Z",
+            "b repaired",
+        );
+        repaired_selected_row.thread_id = Some(selected_thread_id);
+        let mut replacement_row = make_row("/tmp/c.jsonl", "2025-01-01T00:00:00Z", "c");
+        replacement_row.thread_id = Some(replacement_thread_id);
 
         state
             .handle_background_event(BackgroundEvent::Page {
@@ -4108,10 +4126,7 @@ mod tests {
                 search_token: request.search_token,
                 phase: PageLoadPhase::Reconciled,
                 page: Ok(page(
-                    vec![
-                        make_row("/tmp/b.jsonl", "2025-01-02T00:00:00Z", "b repaired"),
-                        make_row("/tmp/c.jsonl", "2025-01-01T00:00:00Z", "c"),
-                    ],
+                    vec![repaired_selected_row, replacement_row],
                     Some("scan-cursor"),
                     /*num_scanned_files*/ 3,
                     /*reached_scan_cap*/ false,
@@ -4126,6 +4141,10 @@ mod tests {
             ThreadListLookupMode::ScanAndRepair
         );
         assert_eq!(state.selected, 0);
+        assert_eq!(
+            state.filtered_rows[state.selected].thread_id,
+            Some(selected_thread_id)
+        );
         assert_eq!(
             state
                 .filtered_rows

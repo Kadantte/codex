@@ -1031,7 +1031,9 @@ fn validated_session_target(
 }
 
 fn thread_matches_query(thread: &Thread, query: &str) -> bool {
-    thread.preview.to_lowercase().contains(query)
+    displayed_thread_preview(&thread.preview)
+        .to_lowercase()
+        .contains(query)
         || thread
             .name
             .as_ref()
@@ -2197,14 +2199,9 @@ fn row_from_app_server_thread(thread: Thread) -> Option<Row> {
             return None;
         }
     };
-    let preview = thread.preview.trim();
     Some(Row {
         path: thread.path,
-        preview: if preview.is_empty() {
-            String::from("(no message yet)")
-        } else {
-            preview.to_string()
-        },
+        preview: displayed_thread_preview(&thread.preview).to_string(),
         thread_id: Some(thread_id),
         thread_name: thread.name,
         created_at: chrono::DateTime::from_timestamp(thread.created_at, 0)
@@ -2214,6 +2211,15 @@ fn row_from_app_server_thread(thread: Thread) -> Option<Row> {
         cwd: Some(thread.cwd.to_path_buf()),
         git_branch: thread.git_info.and_then(|git_info| git_info.branch),
     })
+}
+
+fn displayed_thread_preview(preview: &str) -> &str {
+    let preview = preview.trim();
+    if preview.is_empty() {
+        "(no message yet)"
+    } else {
+        preview
+    }
 }
 
 fn thread_list_params(
@@ -6673,6 +6679,19 @@ session_picker_view = "dense"
             "",
         )
         .expect("authoritative metadata should match");
+        assert_eq!(target.path, Some(PathBuf::from("/tmp/repaired.jsonl")));
+
+        let mut empty_preview_thread = thread.clone();
+        empty_preview_thread.preview.clear();
+        let target = validated_session_target(
+            empty_preview_thread,
+            thread_id,
+            Some(Path::new("/tmp/current")),
+            &ProviderFilter::MatchDefault(String::from("openai")),
+            /*include_non_interactive*/ false,
+            "(no message yet)",
+        )
+        .expect("displayed empty preview placeholder should match");
         assert_eq!(target.path, Some(PathBuf::from("/tmp/repaired.jsonl")));
 
         let error = validated_session_target(

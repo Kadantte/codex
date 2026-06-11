@@ -29,6 +29,7 @@ members = [
     "collaboration-mode-templates",
     "connectors",
     "config",
+    "workload-identity",
     "context-fragments",
     "shell-command",
     "shell-escalation",
@@ -158,6 +159,7 @@ codex-cloud-tasks-client = { path = "cloud-tasks-client" }
 codex-cloud-tasks-mock-client = { path = "cloud-tasks-mock-client" }
 codex-code-mode = { path = "code-mode" }
 codex-config = { path = "config" }
+codex-workload-identity = { path = "workload-identity" }
 codex-connectors = { path = "connectors" }
 codex-context-fragments = { path = "context-fragments" }
 codex-core = { path = "core" }

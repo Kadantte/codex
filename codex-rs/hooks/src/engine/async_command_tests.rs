@@ -9,6 +9,7 @@ use crate::engine::CommandShell;
 use crate::engine::ConfiguredHandler;
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::HookEventName;
+use codex_protocol::protocol::HookExecutionMode;
 use codex_protocol::protocol::HookSource;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use std::collections::HashMap;
@@ -108,6 +109,7 @@ async fn launch_is_skipped_at_session_concurrency_limit() {
             source: HookSource::User,
             display_order: 0,
             env: HashMap::new(),
+            execution_mode: HookExecutionMode::Async,
         },
         String::new(),
         std::env::current_dir().expect("current dir"),

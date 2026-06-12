@@ -164,7 +164,7 @@ pub(crate) async fn run_turn(
         return None;
     }
     let mut can_drain_pending_input = input.is_empty();
-    if run_hooks_and_record_inputs(&sess, &turn_context, &input).await {
+    if run_user_prompt_submit_hooks_and_record_inputs(&sess, &turn_context, &input).await {
         return None;
     }
 
@@ -209,7 +209,9 @@ pub(crate) async fn run_turn(
             Vec::new()
         };
 
-        if run_hooks_and_record_inputs(&sess, &turn_context, &pending_input).await {
+        if run_user_prompt_submit_hooks_and_record_inputs(&sess, &turn_context, &pending_input)
+            .await
+        {
             break;
         }
 
@@ -423,12 +425,21 @@ async fn turn_diff_display_roots(turn_context: &TurnContext) -> Vec<(String, Pat
     display_roots
 }
 
+/// Runs `UserPromptSubmit` hooks and records accepted input.
+///
+/// Before running synchronous hooks, this captures which async hook outputs
+/// have already finished. When user input is accepted, only those outputs are
+/// delivered for that request. Output that finishes while the synchronous hooks
+/// run waits for the next accepted request. If every user input is blocked,
+/// queued output remains pending.
 #[instrument(level = "trace", skip_all)]
-async fn run_hooks_and_record_inputs(
+async fn run_user_prompt_submit_hooks_and_record_inputs(
     sess: &Arc<Session>,
     turn_context: &Arc<TurnContext>,
     input: &[TurnInput],
 ) -> bool {
+    let hooks = sess.hooks();
+    let async_output_ready_before_hooks = hooks.async_delivery_cutoff();
     let mut blocked_input = false;
     let mut accepted_user_input = false;
     for input_item in input {
@@ -447,6 +458,15 @@ async fn run_hooks_and_record_inputs(
                 hook_outcome.additional_contexts,
             )
             .await;
+        }
+    }
+    if accepted_user_input {
+        let delivery =
+            hooks.commit_accepted_turn_and_drain_async_output(async_output_ready_before_hooks);
+        record_additional_contexts(sess, turn_context, delivery.additional_contexts).await;
+        for message in delivery.system_messages {
+            sess.send_event(turn_context, EventMsg::Warning(WarningEvent { message }))
+                .await;
         }
     }
     blocked_input && !accepted_user_input

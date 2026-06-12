@@ -57,7 +57,7 @@ pub(crate) fn preview(
     request: &PostToolUseRequest,
 ) -> Vec<HookRunSummary> {
     let matcher_inputs = common::matcher_inputs(&request.tool_name, &request.matcher_aliases);
-    dispatcher::select_handlers_for_matcher_inputs(
+    dispatcher::select_sync_handlers_for_matcher_inputs(
         handlers,
         HookEventName::PostToolUse,
         &matcher_inputs,
@@ -72,6 +72,7 @@ pub(crate) fn preview(
 pub(crate) async fn run(
     handlers: &[ConfiguredHandler],
     shell: &CommandShell,
+    async_runtime: &crate::engine::async_command::AsyncCommandRuntime,
     request: PostToolUseRequest,
 ) -> PostToolUseOutcome {
     let matcher_inputs = common::matcher_inputs(&request.tool_name, &request.matcher_aliases);
@@ -109,6 +110,8 @@ pub(crate) async fn run(
         input_json,
         request.cwd.as_path(),
         Some(request.turn_id.clone()),
+        async_runtime,
+        request.session_id,
         parse_completed,
     )
     .await;
@@ -557,6 +560,7 @@ mod tests {
             source: codex_protocol::protocol::HookSource::User,
             display_order: 0,
             env: std::collections::HashMap::new(),
+            execution_mode: codex_protocol::protocol::HookExecutionMode::Sync,
         }
     }
 

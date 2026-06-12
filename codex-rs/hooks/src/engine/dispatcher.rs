@@ -3,6 +3,7 @@ use std::path::Path;
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
 
+use codex_protocol::ThreadId;
 use codex_protocol::protocol::HookCompletedEvent;
 use codex_protocol::protocol::HookEventName;
 use codex_protocol::protocol::HookExecutionMode;
@@ -13,6 +14,7 @@ use codex_protocol::protocol::HookScope;
 
 use super::CommandShell;
 use super::ConfiguredHandler;
+use super::async_command::AsyncCommandRuntime;
 use super::command_runner::CommandRunResult;
 use super::command_runner::run_command;
 use crate::events::common::matches_matcher;
@@ -31,6 +33,28 @@ pub(crate) fn select_handlers(
 ) -> Vec<ConfiguredHandler> {
     let matcher_inputs = matcher_input.into_iter().collect::<Vec<_>>();
     select_handlers_for_matcher_inputs(handlers, event_name, &matcher_inputs)
+}
+
+pub(crate) fn select_sync_handlers(
+    handlers: &[ConfiguredHandler],
+    event_name: HookEventName,
+    matcher_input: Option<&str>,
+) -> Vec<ConfiguredHandler> {
+    select_handlers(handlers, event_name, matcher_input)
+        .into_iter()
+        .filter(|handler| handler.execution_mode == HookExecutionMode::Sync)
+        .collect()
+}
+
+pub(crate) fn select_sync_handlers_for_matcher_inputs(
+    handlers: &[ConfiguredHandler],
+    event_name: HookEventName,
+    matcher_inputs: &[&str],
+) -> Vec<ConfiguredHandler> {
+    select_handlers_for_matcher_inputs(handlers, event_name, matcher_inputs)
+        .into_iter()
+        .filter(|handler| handler.execution_mode == HookExecutionMode::Sync)
+        .collect()
 }
 
 pub(crate) fn select_handlers_for_matcher_inputs(
@@ -72,7 +96,7 @@ pub(crate) fn running_summary(handler: &ConfiguredHandler) -> HookRunSummary {
         id: handler.run_id(),
         event_name: handler.event_name,
         handler_type: HookHandlerType::Command,
-        execution_mode: HookExecutionMode::Sync,
+        execution_mode: handler.execution_mode,
         scope: scope_for_event(handler.event_name),
         source_path: handler.source_path.clone(),
         source: handler.source,
@@ -86,22 +110,39 @@ pub(crate) fn running_summary(handler: &ConfiguredHandler) -> HookRunSummary {
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "keeping async runtime and session identity explicit avoids event-specific wrappers"
+)]
 pub(crate) async fn execute_handlers<T>(
     shell: &CommandShell,
     handlers: Vec<ConfiguredHandler>,
     input_json: String,
     cwd: &Path,
     turn_id: Option<String>,
+    async_runtime: &AsyncCommandRuntime,
+    session_id: ThreadId,
     parse: fn(&ConfiguredHandler, CommandRunResult, Option<String>) -> ParsedHandler<T>,
 ) -> Vec<ParsedHandler<T>> {
     let mut pending = FuturesUnordered::new();
     for (configured_order, handler) in handlers.into_iter().enumerate() {
         let input_json = input_json.clone();
         let turn_id = turn_id.clone();
-        pending.push(async move {
-            let result = run_command(shell, &handler, &input_json, cwd).await;
-            (configured_order, parse(&handler, result, turn_id))
-        });
+        match handler.execution_mode {
+            HookExecutionMode::Sync => {
+                pending.push(async move {
+                    let result = run_command(shell, &handler, &input_json, cwd).await;
+                    (configured_order, parse(&handler, result, turn_id))
+                });
+            }
+            HookExecutionMode::Async => async_runtime.spawn(
+                shell.clone(),
+                handler,
+                input_json,
+                cwd.to_path_buf(),
+                session_id,
+            ),
+        }
     }
 
     let mut completed = Vec::new();
@@ -125,7 +166,7 @@ pub(crate) fn completed_summary(
         id: handler.run_id(),
         event_name: handler.event_name,
         handler_type: HookHandlerType::Command,
-        execution_mode: HookExecutionMode::Sync,
+        execution_mode: handler.execution_mode,
         scope: scope_for_event(handler.event_name),
         source_path: handler.source_path.clone(),
         source: handler.source,
@@ -156,6 +197,7 @@ fn scope_for_event(event_name: HookEventName) -> HookScope {
 #[cfg(test)]
 mod tests {
     use codex_protocol::protocol::HookEventName;
+    use codex_protocol::protocol::HookExecutionMode;
     use codex_protocol::protocol::HookSource;
     use codex_utils_absolute_path::test_support::PathBufExt;
     use codex_utils_absolute_path::test_support::test_path_buf;
@@ -180,6 +222,7 @@ mod tests {
             source: HookSource::User,
             display_order,
             env: std::collections::HashMap::new(),
+            execution_mode: HookExecutionMode::Sync,
         }
     }
 

@@ -2,9 +2,12 @@ use codex_config::ConfigLayerStack;
 use codex_plugin::PluginHookSource;
 use tokio::process::Command;
 
+use crate::engine::AsyncHookDelivery;
+use crate::engine::AsyncHookDeliveryCutoff;
 use crate::engine::ClaudeHooksEngine;
 use crate::engine::CommandShell;
 use crate::engine::HookListEntry;
+use crate::engine::async_command::AsyncCommandRuntime;
 use crate::events::compact::PostCompactRequest;
 use crate::events::compact::PreCompactOutcome;
 use crate::events::compact::PreCompactRequest;
@@ -58,6 +61,14 @@ impl Default for Hooks {
 
 impl Hooks {
     pub fn new(config: HooksConfig) -> Self {
+        Self::from_config(config, AsyncCommandRuntime::new())
+    }
+
+    pub fn reconfigured(&self, config: HooksConfig) -> Self {
+        Self::from_config(config, self.engine.async_runtime().clone())
+    }
+
+    fn from_config(config: HooksConfig, async_runtime: AsyncCommandRuntime) -> Self {
         let after_agent = config
             .legacy_notify_argv
             .filter(|argv| !argv.is_empty() && !argv[0].is_empty())
@@ -74,11 +85,29 @@ impl Hooks {
                 program: config.shell_program.unwrap_or_default(),
                 args: config.shell_args,
             },
+            async_runtime,
         );
         Self {
             after_agent,
             engine,
         }
+    }
+
+    pub fn async_delivery_cutoff(&self) -> AsyncHookDeliveryCutoff {
+        self.engine.async_runtime().delivery_cutoff()
+    }
+
+    pub fn commit_accepted_turn_and_drain_async_output(
+        &self,
+        cutoff: AsyncHookDeliveryCutoff,
+    ) -> AsyncHookDelivery {
+        self.engine
+            .async_runtime()
+            .commit_accepted_turn_and_drain(cutoff)
+    }
+
+    pub async fn shutdown(&self) {
+        self.engine.async_runtime().shutdown().await;
     }
 
     pub fn startup_warnings(&self) -> &[String] {

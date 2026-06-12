@@ -962,6 +962,8 @@ async fn load_transcript_preview(
     Ok(lines)
 }
 
+/// Reads current metadata for a provisional State DB result without loading its
+/// turns, then verifies that the thread still belongs in the active picker view.
 async fn validate_session_target(
     request_handle: AppServerRequestHandle,
     thread_id: ThreadId,
@@ -990,6 +992,12 @@ async fn validate_session_target(
     )
 }
 
+/// Validates that a `thread/read` result still matches the selected thread and
+/// the picker's provider, source, working-directory, archive, and search
+/// filters.
+///
+/// Mismatches are reported as [`std::io::ErrorKind::NotFound`] so a stale
+/// provisional row leaves the picker open instead of resuming the wrong thread.
 fn validated_session_target(
     thread: Thread,
     thread_id: ThreadId,
@@ -1705,6 +1713,12 @@ impl PickerState {
         self.frozen_footer_percent = None;
     }
 
+    /// Replaces the current result set with a new first page while preserving
+    /// the selected thread when it is still present.
+    ///
+    /// This is used when scan-and-repair supersedes the provisional State DB
+    /// page, so pagination and deduplication state are reset rather than
+    /// appended.
     fn replace_with_page(&mut self, page: PickerPage) {
         let selected_row = self.filtered_rows.get(self.selected);
         let selected_thread_id = selected_row.and_then(|row| row.thread_id);
@@ -1840,6 +1854,11 @@ impl PickerState {
         self.reevaluate_search();
     }
 
+    /// Restarts cursor-based search when the current rows contain no match and
+    /// more pages remain.
+    ///
+    /// This must also run after reconciliation because replacing the provisional
+    /// State DB page can invalidate the previous search result.
     fn reevaluate_search(&mut self) {
         if self.query.is_empty()
             || !self.filtered_rows.is_empty()

@@ -34,7 +34,7 @@ exit 1
 }
 
 #[test]
-fn system_bwrap_warning_skips_unrelated_bwrap_failures() {
+fn system_bwrap_warning_reports_unexpected_bwrap_failures() {
     let fake_bwrap = write_fake_bwrap(
         r#"#!/bin/sh
 echo 'bwrap: Unknown option --argv0' >&2
@@ -43,11 +43,36 @@ exit 1
     );
     let fake_bwrap_path: &Path = fake_bwrap.as_ref();
 
-    assert_eq!(system_bwrap_warning_for_path(Some(fake_bwrap_path)), None);
+    assert_eq!(
+        system_bwrap_warning_for_path(Some(fake_bwrap_path)),
+        Some(BWRAP_PROBE_WARNING.to_string())
+    );
 }
 
 #[test]
-fn system_bwrap_probe_times_out_without_reporting_a_warning() {
+fn system_bwrap_warning_reports_disconnected_proc_sys() {
+    for failure in [
+        "Transport endpoint is not connected",
+        "Socket not connected",
+    ] {
+        let fake_bwrap = write_fake_bwrap(&format!(
+            r#"#!/bin/sh
+echo "bwrap: Can't read /proc/sys/kernel/overflowuid: {failure}" >&2
+exit 1
+"#
+        ));
+        let fake_bwrap_path: &Path = fake_bwrap.as_ref();
+
+        assert_eq!(
+            system_bwrap_warning_for_path(Some(fake_bwrap_path)),
+            Some(PROC_SYS_DISCONNECTED_WARNING.to_string()),
+            "{failure}"
+        );
+    }
+}
+
+#[test]
+fn system_bwrap_probe_reports_timeout() {
     let fake_bwrap = write_fake_bwrap(
         r#"#!/bin/sh
 sleep 1
@@ -57,10 +82,10 @@ exit 0
     let fake_bwrap_path: &Path = fake_bwrap.as_ref();
     let started_at = Instant::now();
 
-    assert!(system_bwrap_has_user_namespace_access(
-        fake_bwrap_path,
-        Duration::from_millis(10),
-    ));
+    assert_eq!(
+        probe_system_bwrap(fake_bwrap_path, Duration::from_millis(10)),
+        SystemBwrapProbeResult::Failed
+    );
     assert!(started_at.elapsed() < Duration::from_millis(500));
 }
 
@@ -76,10 +101,10 @@ exit 1
     let fake_bwrap_path: &Path = fake_bwrap.as_ref();
     let started_at = Instant::now();
 
-    assert!(!system_bwrap_has_user_namespace_access(
-        fake_bwrap_path,
-        Duration::from_millis(100),
-    ));
+    assert_eq!(
+        probe_system_bwrap(fake_bwrap_path, Duration::from_millis(100)),
+        SystemBwrapProbeResult::UserNamespaceUnavailable
+    );
     assert!(started_at.elapsed() < Duration::from_millis(500));
 }
 

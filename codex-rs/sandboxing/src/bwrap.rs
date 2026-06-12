@@ -22,6 +22,14 @@ const MISSING_BWRAP_WARNING: &str = concat!(
 );
 const USER_NAMESPACE_WARNING: &str =
     "Codex's Linux sandbox uses bubblewrap and needs access to create user namespaces.";
+const PROC_SYS_DISCONNECTED_WARNING: &str = concat!(
+    "Codex's Linux sandbox cannot access /proc/sys because the mount is disconnected. ",
+    "Restart the environment or container before running sandboxed commands.",
+);
+const BWRAP_PROBE_WARNING: &str = concat!(
+    "Codex could not verify that bubblewrap can start its Linux sandbox. ",
+    "Check the bubblewrap installation and container health.",
+);
 pub(crate) const WSL1_BWRAP_WARNING: &str = concat!(
     "Codex's Linux sandbox uses bubblewrap, which is not supported on WSL1 ",
     "because WSL1 cannot create the required user namespaces. ",
@@ -36,6 +44,14 @@ const USER_NAMESPACE_FAILURES: [&str; 4] = [
 const SYSTEM_BWRAP_PROBE_TIMEOUT: Duration = Duration::from_millis(500);
 const SYSTEM_BWRAP_PROBE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const SYSTEM_BWRAP_PROBE_STDERR_LIMIT_BYTES: u64 = 64 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SystemBwrapProbeResult {
+    Available,
+    UserNamespaceUnavailable,
+    ProcSysDisconnected,
+    Failed,
+}
 
 pub fn system_bwrap_warning(permission_profile: &PermissionProfile) -> Option<String> {
     if !should_warn_about_system_bwrap(permission_profile) {
@@ -64,14 +80,19 @@ fn system_bwrap_warning_for_path(system_bwrap_path: Option<&Path>) -> Option<Str
         return Some(MISSING_BWRAP_WARNING.to_string());
     };
 
-    if !system_bwrap_has_user_namespace_access(system_bwrap_path, SYSTEM_BWRAP_PROBE_TIMEOUT) {
-        return Some(USER_NAMESPACE_WARNING.to_string());
+    match probe_system_bwrap(system_bwrap_path, SYSTEM_BWRAP_PROBE_TIMEOUT) {
+        SystemBwrapProbeResult::Available => None,
+        SystemBwrapProbeResult::UserNamespaceUnavailable => {
+            Some(USER_NAMESPACE_WARNING.to_string())
+        }
+        SystemBwrapProbeResult::ProcSysDisconnected => {
+            Some(PROC_SYS_DISCONNECTED_WARNING.to_string())
+        }
+        SystemBwrapProbeResult::Failed => Some(BWRAP_PROBE_WARNING.to_string()),
     }
-
-    None
 }
 
-fn system_bwrap_has_user_namespace_access(system_bwrap_path: &Path, timeout: Duration) -> bool {
+fn probe_system_bwrap(system_bwrap_path: &Path, timeout: Duration) -> SystemBwrapProbeResult {
     let mut child = match Command::new(system_bwrap_path)
         .args([
             "--unshare-user",
@@ -86,7 +107,7 @@ fn system_bwrap_has_user_namespace_access(system_bwrap_path: &Path, timeout: Dur
         .spawn()
     {
         Ok(child) => child,
-        Err(_) => return true,
+        Err(_) => return SystemBwrapProbeResult::Failed,
     };
 
     let deadline = Instant::now() + timeout;
@@ -116,20 +137,29 @@ fn system_bwrap_has_user_namespace_access(system_bwrap_path: &Path, timeout: Dur
                     stdout: Vec::new(),
                     stderr,
                 };
-                return output.status.success() || !is_user_namespace_failure(&output);
+                if output.status.success() {
+                    return SystemBwrapProbeResult::Available;
+                }
+                if is_user_namespace_failure(&output) {
+                    return SystemBwrapProbeResult::UserNamespaceUnavailable;
+                }
+                if is_proc_sys_disconnected(&output) {
+                    return SystemBwrapProbeResult::ProcSysDisconnected;
+                }
+                return SystemBwrapProbeResult::Failed;
             }
             Ok(None) => {
                 if Instant::now() >= deadline {
                     let _ = child.kill();
                     let _ = child.wait();
-                    return true;
+                    return SystemBwrapProbeResult::Failed;
                 }
                 thread::sleep(SYSTEM_BWRAP_PROBE_POLL_INTERVAL);
             }
             Err(_) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return true;
+                return SystemBwrapProbeResult::Failed;
             }
         }
     }
@@ -163,6 +193,13 @@ fn is_user_namespace_failure(output: &Output) -> bool {
     USER_NAMESPACE_FAILURES
         .iter()
         .any(|failure| stderr.contains(failure))
+}
+
+fn is_proc_sys_disconnected(output: &Output) -> bool {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    stderr.contains("/proc/sys")
+        && (stderr.contains("Transport endpoint is not connected")
+            || stderr.contains("Socket not connected"))
 }
 
 pub fn find_system_bwrap_in_path() -> Option<PathBuf> {

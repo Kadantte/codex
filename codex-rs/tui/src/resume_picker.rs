@@ -147,8 +147,7 @@ struct PageLoadRequest {
     cwd_filter: Option<PathBuf>,
     provider_filter: ProviderFilter,
     sort_key: ThreadSortKey,
-    lookup_mode: ThreadListLookupMode,
-    reconcile_after_load: bool,
+    seed_from_state_db: bool,
 }
 
 enum PickerLoadRequest {
@@ -244,10 +243,13 @@ impl From<SessionListDensity> for SessionPickerViewMode {
 
 type PickerLoader = Arc<dyn Fn(PickerLoadRequest) + Send + Sync>;
 enum BackgroundEvent {
+    SeedPage {
+        request_token: usize,
+        page: PickerPage,
+    },
     Page {
         request_token: usize,
         search_token: Option<usize>,
-        phase: PageLoadPhase,
         page: std::io::Result<PickerPage>,
     },
     Preview {
@@ -258,13 +260,6 @@ enum BackgroundEvent {
         thread_id: ThreadId,
         transcript: std::io::Result<TranscriptCells>,
     },
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum PageLoadPhase {
-    Fast,
-    Reconciled,
-    Incremental,
 }
 
 #[derive(Clone)]
@@ -295,26 +290,13 @@ struct SessionPickerRunOptions {
     view_persistence: Option<SessionPickerViewPersistence>,
     pager_keymap: PagerKeymap,
     list_keymap: ListKeymap,
-    initial_page_load: InitialPageLoadState,
+    seed_from_state_db: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ThreadListLookupMode {
     StateDbOnly,
     ScanAndRepair,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum InitialPageLoadState {
-    ScanAndRepair,
-    StateDbFirst,
-    VerifyingStateDb,
-}
-
-impl InitialPageLoadState {
-    fn is_verifying(self) -> bool {
-        self == Self::VerifyingStateDb
-    }
 }
 
 /// Interactive session picker that lists app-server threads with simple search,
@@ -329,6 +311,10 @@ impl InitialPageLoadState {
 /// `thread/list` API returns pages ordered by the selected sort key, and the
 /// picker deduplicates across pages to handle overlapping windows when new
 /// sessions appear during pagination.
+///
+/// For local workspaces, the picker seeds its first page from the State DB,
+/// then replaces those provisional rows when the normal scan-and-repair lookup
+/// completes. Remote workspaces use the normal lookup directly.
 ///
 /// Filtering happens in two layers:
 /// 1. Provider, source, and eligible working-directory filtering at the backend.
@@ -401,11 +387,7 @@ async fn run_resume_picker_with_launch_context(
         }),
         pager_keymap: runtime_keymap.pager,
         list_keymap: runtime_keymap.list,
-        initial_page_load: if uses_remote_workspace {
-            InitialPageLoadState::ScanAndRepair
-        } else {
-            InitialPageLoadState::StateDbFirst
-        },
+        seed_from_state_db: !uses_remote_workspace,
     };
     run_session_picker_with_loader(
         tui,
@@ -451,11 +433,7 @@ pub async fn run_fork_picker_with_app_server(
         }),
         pager_keymap: runtime_keymap.pager,
         list_keymap: runtime_keymap.list,
-        initial_page_load: if uses_remote_workspace {
-            InitialPageLoadState::ScanAndRepair
-        } else {
-            InitialPageLoadState::StateDbFirst
-        },
+        seed_from_state_db: !uses_remote_workspace,
     };
     run_session_picker_with_loader(
         tui,
@@ -492,7 +470,7 @@ async fn run_session_picker_with_loader(
     state.pager_keymap = options.pager_keymap;
     state.list_keymap = options.list_keymap;
     state.launch_context = options.launch_context;
-    state.initial_page_load = options.initial_page_load;
+    state.seed_from_state_db = options.seed_from_state_db;
     state.start_initial_load();
     state.request_frame();
 
@@ -603,28 +581,22 @@ fn spawn_app_server_page_loader(
         while let Some(request) = request_rx.recv().await {
             match request {
                 PickerLoadRequest::Page(request) => {
-                    let cursor = request
-                        .cursor
-                        .clone()
-                        .map(|PageCursor::AppServer(cursor)| cursor);
-                    let page = load_app_server_page(
-                        &mut app_server,
-                        cursor,
-                        request.cwd_filter.as_deref(),
-                        request.provider_filter.clone(),
-                        request.sort_key,
-                        include_non_interactive,
-                        request.lookup_mode,
-                    )
-                    .await;
-                    if request.reconcile_after_load {
-                        match page {
+                    if request.seed_from_state_db {
+                        match load_app_server_page(
+                            &mut app_server,
+                            /*cursor*/ None,
+                            request.cwd_filter.as_deref(),
+                            request.provider_filter.clone(),
+                            request.sort_key,
+                            include_non_interactive,
+                            ThreadListLookupMode::StateDbOnly,
+                        )
+                        .await
+                        {
                             Ok(page) => {
-                                let _ = bg_tx.send(BackgroundEvent::Page {
+                                let _ = bg_tx.send(BackgroundEvent::SeedPage {
                                     request_token: request.request_token,
-                                    search_token: request.search_token,
-                                    phase: PageLoadPhase::Fast,
-                                    page: Ok(page),
+                                    page,
                                 });
                             }
                             Err(err) => {
@@ -634,32 +606,24 @@ fn spawn_app_server_page_loader(
                                 );
                             }
                         }
-
-                        let cursor = request.cursor.map(|PageCursor::AppServer(cursor)| cursor);
-                        let page = load_app_server_page(
-                            &mut app_server,
-                            cursor,
-                            request.cwd_filter.as_deref(),
-                            request.provider_filter,
-                            request.sort_key,
-                            include_non_interactive,
-                            ThreadListLookupMode::ScanAndRepair,
-                        )
-                        .await;
-                        let _ = bg_tx.send(BackgroundEvent::Page {
-                            request_token: request.request_token,
-                            search_token: request.search_token,
-                            phase: PageLoadPhase::Reconciled,
-                            page,
-                        });
-                    } else {
-                        let _ = bg_tx.send(BackgroundEvent::Page {
-                            request_token: request.request_token,
-                            search_token: request.search_token,
-                            phase: PageLoadPhase::Incremental,
-                            page,
-                        });
                     }
+
+                    let cursor = request.cursor.map(|PageCursor::AppServer(cursor)| cursor);
+                    let page = load_app_server_page(
+                        &mut app_server,
+                        cursor,
+                        request.cwd_filter.as_deref(),
+                        request.provider_filter,
+                        request.sort_key,
+                        include_non_interactive,
+                        ThreadListLookupMode::ScanAndRepair,
+                    )
+                    .await;
+                    let _ = bg_tx.send(BackgroundEvent::Page {
+                        request_token: request.request_token,
+                        search_token: request.search_token,
+                        page,
+                    });
                 }
                 PickerLoadRequest::Preview { thread_id } => {
                     let preview = load_transcript_preview(&mut app_server, thread_id).await;
@@ -752,7 +716,8 @@ struct PickerState {
     overlay: Option<Overlay>,
     pager_keymap: PagerKeymap,
     list_keymap: ListKeymap,
-    initial_page_load: InitialPageLoadState,
+    seed_from_state_db: bool,
+    provisional_rows: bool,
 }
 
 struct PaginationState {
@@ -760,7 +725,6 @@ struct PaginationState {
     num_scanned_files: usize,
     reached_scan_cap: bool,
     loading: LoadingState,
-    lookup_mode: ThreadListLookupMode,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -903,8 +867,8 @@ async fn load_transcript_preview(
     Ok(lines)
 }
 
-/// Verifies that a provisional State DB row still points to the selected
-/// rollout before allowing the picker to resume or fork it.
+/// Reads the first rollout record to verify that a provisional State DB row
+/// still points to the selected session before allowing a resume or fork.
 async fn validate_provisional_session_target(
     path: Option<PathBuf>,
     thread_id: ThreadId,
@@ -1081,7 +1045,6 @@ impl PickerState {
                 num_scanned_files: 0,
                 reached_scan_cap: false,
                 loading: LoadingState::Idle,
-                lookup_mode: ThreadListLookupMode::ScanAndRepair,
             },
             all_rows: Vec::new(),
             filtered_rows: Vec::new(),
@@ -1116,7 +1079,8 @@ impl PickerState {
             overlay: None,
             pager_keymap: RuntimeKeymap::defaults().pager,
             list_keymap: RuntimeKeymap::defaults().list,
-            initial_page_load: InitialPageLoadState::ScanAndRepair,
+            seed_from_state_db: false,
+            provisional_rows: false,
         }
     }
 
@@ -1294,7 +1258,7 @@ impl PickerState {
                         },
                     };
                     if let Some(thread_id) = thread_id {
-                        if self.initial_page_load.is_verifying() {
+                        if self.provisional_rows {
                             return match validate_provisional_session_target(path, thread_id).await {
                                 Ok(target) => {
                                     Ok(Some(self.action.selection(target.path, target.thread_id)))
@@ -1437,14 +1401,6 @@ impl PickerState {
     fn start_initial_load(&mut self) {
         self.relative_time_reference = Some(Utc::now());
         self.reset_pagination();
-        let (lookup_mode, reconcile_after_load) = match self.initial_page_load {
-            InitialPageLoadState::ScanAndRepair => (ThreadListLookupMode::ScanAndRepair, false),
-            InitialPageLoadState::StateDbFirst | InitialPageLoadState::VerifyingStateDb => {
-                self.initial_page_load = InitialPageLoadState::StateDbFirst;
-                (ThreadListLookupMode::StateDbOnly, true)
-            }
-        };
-        self.pagination.lookup_mode = lookup_mode;
         self.all_rows.clear();
         self.filtered_rows.clear();
         self.seen_rows.clear();
@@ -1462,6 +1418,7 @@ impl PickerState {
         };
 
         let request_token = self.allocate_request_token();
+        let seed_from_state_db = std::mem::take(&mut self.seed_from_state_db);
         self.pagination.loading = LoadingState::Pending(PendingLoad {
             request_token,
             search_token,
@@ -1475,17 +1432,32 @@ impl PickerState {
             cwd_filter: self.active_cwd_filter(),
             provider_filter: self.provider_filter.clone(),
             sort_key: self.sort_key,
-            lookup_mode: self.pagination.lookup_mode,
-            reconcile_after_load,
+            seed_from_state_db,
         }));
+    }
+
+    fn seed_initial_page(&mut self, page: PickerPage) {
+        self.provisional_rows = true;
+        self.replace_with_page(page);
     }
 
     async fn handle_background_event(&mut self, event: BackgroundEvent) -> Result<()> {
         match event {
+            BackgroundEvent::SeedPage {
+                request_token,
+                page,
+            } => {
+                let LoadingState::Pending(pending) = self.pagination.loading else {
+                    return Ok(());
+                };
+                if pending.request_token != request_token {
+                    return Ok(());
+                }
+                self.seed_initial_page(page);
+            }
             BackgroundEvent::Page {
                 request_token,
                 search_token,
-                phase,
                 page,
             } => {
                 let pending = match self.pagination.loading {
@@ -1495,48 +1467,39 @@ impl PickerState {
                 if pending.request_token != request_token {
                     return Ok(());
                 }
-                match phase {
-                    PageLoadPhase::Fast => {
-                        let page = page.map_err(color_eyre::Report::from)?;
-                        self.initial_page_load = InitialPageLoadState::VerifyingStateDb;
-                        self.pagination.lookup_mode = ThreadListLookupMode::StateDbOnly;
+                self.pagination.loading = LoadingState::Idle;
+                match page {
+                    Ok(page) if self.provisional_rows => {
+                        self.provisional_rows = false;
                         self.replace_with_page(page);
-                    }
-                    PageLoadPhase::Reconciled => {
-                        self.pagination.loading = LoadingState::Idle;
-                        let search_needs_reevaluation = match page {
-                            Ok(page) => {
-                                self.initial_page_load = InitialPageLoadState::StateDbFirst;
-                                self.pagination.lookup_mode = ThreadListLookupMode::ScanAndRepair;
-                                self.replace_with_page(page);
-                                true
-                            }
-                            Err(err) if self.initial_page_load.is_verifying() => {
-                                warn!(
-                                    %err,
-                                    "Session picker reconciliation failed; keeping State DB results"
-                                );
-                                self.request_frame();
-                                false
-                            }
-                            Err(err) => return Err(color_eyre::Report::from(err)),
-                        };
                         self.complete_pending_page_down();
-                        if search_needs_reevaluation {
-                            self.reevaluate_search();
-                        } else {
-                            let completed_token = pending.search_token.or(search_token);
-                            self.continue_search_if_token_matches(completed_token);
-                        }
+                        self.reevaluate_search();
                     }
-                    PageLoadPhase::Incremental => {
-                        self.pagination.loading = LoadingState::Idle;
-                        let page = page.map_err(color_eyre::Report::from)?;
+                    Ok(page) => {
                         self.ingest_page(page);
                         self.complete_pending_page_down();
                         let completed_token = pending.search_token.or(search_token);
                         self.continue_search_if_token_matches(completed_token);
                     }
+                    Err(err) if self.provisional_rows => {
+                        warn!(
+                            %err,
+                            "Session picker reconciliation failed; keeping State DB results"
+                        );
+                        let cached_results_are_truncated = self.pagination.next_cursor.is_some();
+                        self.pagination.next_cursor = None;
+                        self.inline_error = Some(if cached_results_are_truncated {
+                            String::from(
+                                "Could not refresh sessions; showing the first page of indexed results",
+                            )
+                        } else {
+                            String::from("Could not refresh sessions; showing indexed results")
+                        });
+                        self.complete_pending_page_down();
+                        self.reevaluate_search();
+                        self.request_frame();
+                    }
+                    Err(err) => return Err(color_eyre::Report::from(err)),
                 }
             }
             BackgroundEvent::Preview { thread_id, preview } => {
@@ -1582,7 +1545,7 @@ impl PickerState {
         self.pagination.num_scanned_files = 0;
         self.pagination.reached_scan_cap = false;
         self.pagination.loading = LoadingState::Idle;
-        self.pagination.lookup_mode = ThreadListLookupMode::ScanAndRepair;
+        self.provisional_rows = false;
         self.frozen_footer_percent = None;
     }
 
@@ -1880,8 +1843,7 @@ impl PickerState {
             cwd_filter: self.active_cwd_filter(),
             provider_filter: self.provider_filter.clone(),
             sort_key: self.sort_key,
-            lookup_mode: self.pagination.lookup_mode,
-            reconcile_after_load: false,
+            seed_from_state_db: false,
         }));
     }
 
@@ -3516,7 +3478,7 @@ mod tests {
         })
     }
 
-    fn reconciling_picker_state() -> (PickerState, Arc<Mutex<Vec<PageLoadRequest>>>) {
+    fn recording_picker_state() -> (PickerState, Arc<Mutex<Vec<PageLoadRequest>>>) {
         let recorded_requests = Arc::new(Mutex::new(Vec::new()));
         let request_sink = recorded_requests.clone();
         let loader = page_only_loader(move |request| {
@@ -3530,7 +3492,7 @@ mod tests {
             /*filter_cwd*/ None,
             SessionPickerAction::Resume,
         );
-        state.initial_page_load = InitialPageLoadState::StateDbFirst;
+        state.seed_from_state_db = true;
         (state, recorded_requests)
     }
 
@@ -3639,7 +3601,7 @@ mod tests {
     }
 
     #[test]
-    fn local_picker_thread_list_params_include_cwd_filter() {
+    fn state_db_page_params_honor_cwd_filter() {
         let cwd_filter = picker_cwd_filter(
             Path::new("/tmp/project"),
             /*show_all*/ false,
@@ -3660,6 +3622,16 @@ mod tests {
             Some(ThreadListCwdFilter::One(String::from("/tmp/project")))
         );
         assert!(params.use_state_db_only);
+
+        let params = thread_list_params(
+            /*cursor*/ None,
+            /*cwd_filter*/ None,
+            ProviderFilter::MatchDefault(String::from("openai")),
+            ThreadSortKey::UpdatedAt,
+            /*include_non_interactive*/ false,
+            ThreadListLookupMode::StateDbOnly,
+        );
+        assert_eq!(params.cwd, None);
     }
 
     #[test]
@@ -3954,8 +3926,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_picker_reconciles_fast_page_and_preserves_selection() {
-        let (mut state, recorded_requests) = reconciling_picker_state();
+    async fn local_picker_replaces_seed_page_and_preserves_selection() {
+        let (mut state, recorded_requests) = recording_picker_state();
         let first_thread_id = ThreadId::new();
         let selected_thread_id = ThreadId::new();
         let replacement_thread_id = ThreadId::new();
@@ -3963,29 +3935,26 @@ mod tests {
         state.start_initial_load();
 
         let request = recorded_requests.lock().unwrap()[0].clone();
-        assert_eq!(request.lookup_mode, ThreadListLookupMode::StateDbOnly);
-        assert!(request.reconcile_after_load);
+        assert!(request.seed_from_state_db);
         let mut first_row = make_row("/tmp/a.jsonl", "2025-01-03T00:00:00Z", "a");
         first_row.thread_id = Some(first_thread_id);
         let mut selected_row = make_row("/tmp/stale-b.jsonl", "2025-01-02T00:00:00Z", "b");
         selected_row.thread_id = Some(selected_thread_id);
-
         state
-            .handle_background_event(BackgroundEvent::Page {
+            .handle_background_event(BackgroundEvent::SeedPage {
                 request_token: request.request_token,
-                search_token: request.search_token,
-                phase: PageLoadPhase::Fast,
-                page: Ok(page(
+                page: page(
                     vec![first_row, selected_row],
                     Some("db-cursor"),
                     /*num_scanned_files*/ 2,
                     /*reached_scan_cap*/ false,
-                )),
+                ),
             })
             .await
-            .expect("fast page should load");
+            .expect("State DB page should seed the picker");
 
         assert!(state.pagination.loading.is_pending());
+        assert!(state.provisional_rows);
         state.selected = 1;
         state.load_more_if_needed(LoadTrigger::Scroll);
         assert_eq!(recorded_requests.lock().unwrap().len(), 1);
@@ -4002,7 +3971,6 @@ mod tests {
             .handle_background_event(BackgroundEvent::Page {
                 request_token: request.request_token,
                 search_token: request.search_token,
-                phase: PageLoadPhase::Reconciled,
                 page: Ok(page(
                     vec![repaired_selected_row, replacement_row],
                     Some("scan-cursor"),
@@ -4014,10 +3982,7 @@ mod tests {
             .expect("reconciled page should load");
 
         assert!(!state.pagination.loading.is_pending());
-        assert_eq!(
-            state.pagination.lookup_mode,
-            ThreadListLookupMode::ScanAndRepair
-        );
+        assert!(!state.provisional_rows);
         assert_eq!(state.selected, 0);
         assert_eq!(
             state.filtered_rows[state.selected].thread_id,
@@ -4039,7 +4004,7 @@ mod tests {
         state.load_more_if_needed(LoadTrigger::Scroll);
         let requests = recorded_requests.lock().unwrap();
         assert_eq!(requests.len(), 2);
-        assert_eq!(requests[1].lookup_mode, ThreadListLookupMode::ScanAndRepair);
+        assert!(!requests[1].seed_from_state_db);
         assert!(matches!(
             requests[1].cursor.as_ref(),
             Some(PageCursor::AppServer(cursor)) if cursor == "scan-cursor"
@@ -4047,44 +4012,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_picker_keeps_fast_page_when_reconciliation_fails() {
-        let (mut state, recorded_requests) = reconciling_picker_state();
+    async fn local_picker_keeps_seed_page_when_reconciliation_fails() {
+        let (mut state, recorded_requests) = recording_picker_state();
         let thread_id = ThreadId::new();
 
         state.start_initial_load();
 
         let request = recorded_requests.lock().unwrap()[0].clone();
+        assert!(request.seed_from_state_db);
         let mut provisional_row = make_row("/tmp/a.jsonl", "2025-01-03T00:00:00Z", "a");
         provisional_row.thread_id = Some(thread_id);
         state
-            .handle_background_event(BackgroundEvent::Page {
+            .handle_background_event(BackgroundEvent::SeedPage {
                 request_token: request.request_token,
-                search_token: request.search_token,
-                phase: PageLoadPhase::Fast,
-                page: Ok(page(
+                page: page(
                     vec![provisional_row],
                     Some("db-cursor"),
                     /*num_scanned_files*/ 1,
                     /*reached_scan_cap*/ false,
-                )),
+                ),
             })
             .await
-            .expect("fast page should load");
+            .expect("State DB page should seed the picker");
         state
             .handle_background_event(BackgroundEvent::Page {
                 request_token: request.request_token,
                 search_token: request.search_token,
-                phase: PageLoadPhase::Reconciled,
                 page: Err(std::io::Error::other("scan failed")),
             })
             .await
             .expect("fast page should remain usable");
 
         assert!(!state.pagination.loading.is_pending());
-        assert_eq!(
-            state.pagination.lookup_mode,
-            ThreadListLookupMode::StateDbOnly
-        );
+        assert!(state.provisional_rows);
         assert_eq!(
             state
                 .filtered_rows
@@ -4093,21 +4053,16 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["a"]
         );
-        assert!(matches!(
-            state.pagination.next_cursor.as_ref(),
-            Some(PageCursor::AppServer(cursor)) if cursor == "db-cursor"
-        ));
+        assert!(state.pagination.next_cursor.is_none());
+        assert_eq!(
+            state.inline_error,
+            Some(String::from(
+                "Could not refresh sessions; showing the first page of indexed results"
+            ))
+        );
 
         state.load_more_if_needed(LoadTrigger::Scroll);
-        {
-            let requests = recorded_requests.lock().unwrap();
-            assert_eq!(requests.len(), 2);
-            assert_eq!(requests[1].lookup_mode, ThreadListLookupMode::StateDbOnly);
-            assert!(matches!(
-                requests[1].cursor.as_ref(),
-                Some(PageCursor::AppServer(cursor)) if cursor == "db-cursor"
-            ));
-        }
+        assert_eq!(recorded_requests.lock().unwrap().len(), 1);
 
         let selection = state
             .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
@@ -4121,18 +4076,42 @@ mod tests {
         );
     }
 
+    #[test]
+    fn reloads_do_not_reuse_initial_state_db_seed() {
+        let (mut state, recorded_requests) = recording_picker_state();
+        state.start_initial_load();
+        state.seed_initial_page(page(
+            vec![make_row(
+                "/tmp/provisional.jsonl",
+                "2025-01-03T00:00:00Z",
+                "provisional",
+            )],
+            /*next_cursor*/ None,
+            /*num_scanned_files*/ 1,
+            /*reached_scan_cap*/ false,
+        ));
+
+        state.toggle_sort_key();
+
+        assert!(!state.provisional_rows);
+        assert!(state.all_rows.is_empty());
+        let requests = recorded_requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].seed_from_state_db);
+        assert!(!requests[1].seed_from_state_db);
+        assert_eq!(requests[1].sort_key, ThreadSortKey::CreatedAt);
+    }
+
     async fn assert_reconciliation_restarts_search(provisional_preview: &str) {
-        let (mut state, recorded_requests) = reconciling_picker_state();
+        let (mut state, recorded_requests) = recording_picker_state();
 
         state.start_initial_load();
 
         let initial_request = recorded_requests.lock().unwrap()[0].clone();
         state
-            .handle_background_event(BackgroundEvent::Page {
+            .handle_background_event(BackgroundEvent::SeedPage {
                 request_token: initial_request.request_token,
-                search_token: initial_request.search_token,
-                phase: PageLoadPhase::Fast,
-                page: Ok(page(
+                page: page(
                     vec![make_row(
                         "/tmp/provisional.jsonl",
                         "2025-01-03T00:00:00Z",
@@ -4141,10 +4120,10 @@ mod tests {
                     /*next_cursor*/ None,
                     /*num_scanned_files*/ 1,
                     /*reached_scan_cap*/ false,
-                )),
+                ),
             })
             .await
-            .expect("fast page should load");
+            .expect("State DB page should seed the picker");
         state.set_query(String::from("target"));
         assert!(!state.search_state.is_active());
 
@@ -4152,7 +4131,6 @@ mod tests {
             .handle_background_event(BackgroundEvent::Page {
                 request_token: initial_request.request_token,
                 search_token: initial_request.search_token,
-                phase: PageLoadPhase::Reconciled,
                 page: Ok(page(
                     vec![make_row(
                         "/tmp/reconciled.jsonl",
@@ -4171,7 +4149,6 @@ mod tests {
         assert!(state.search_state.is_active());
         let requests = recorded_requests.lock().unwrap();
         assert_eq!(requests.len(), 2);
-        assert_eq!(requests[1].lookup_mode, ThreadListLookupMode::ScanAndRepair);
         assert!(requests[1].search_token.is_some());
         assert!(matches!(
             requests[1].cursor.as_ref(),
@@ -4301,7 +4278,7 @@ mod tests {
             SessionPickerAction::Resume,
         );
         state.inline_error = Some(String::from(
-            "Failed to read session metadata from /tmp/missing.jsonl",
+            "Could not refresh sessions; showing the first page of indexed results",
         ));
 
         let width: u16 = 80;
@@ -6323,7 +6300,7 @@ session_picker_view = "dense"
         };
         state.all_rows = vec![row.clone()];
         state.filtered_rows = vec![row];
-        state.initial_page_load = InitialPageLoadState::VerifyingStateDb;
+        state.provisional_rows = true;
 
         let selection = state
             .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
@@ -6369,7 +6346,7 @@ session_picker_view = "dense"
         };
         state.all_rows = vec![row.clone()];
         state.filtered_rows = vec![row];
-        state.initial_page_load = InitialPageLoadState::VerifyingStateDb;
+        state.provisional_rows = true;
 
         let selection = state
             .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
@@ -6384,7 +6361,7 @@ session_picker_view = "dense"
     }
 
     #[test]
-    fn hint_line_snapshot_allows_accept_during_session_verification() {
+    fn hint_line_snapshot_allows_accept_for_provisional_rows() {
         let loader = page_only_loader(|_| {});
         let mut state = PickerState::new(
             FrameRequester::test_dummy(),
@@ -6394,7 +6371,7 @@ session_picker_view = "dense"
             /*filter_cwd*/ None,
             SessionPickerAction::Resume,
         );
-        state.initial_page_load = InitialPageLoadState::VerifyingStateDb;
+        state.provisional_rows = true;
 
         assert_snapshot!(
             "resume_picker_footer_verifying",
@@ -6793,7 +6770,6 @@ session_picker_view = "dense"
             .handle_background_event(BackgroundEvent::Page {
                 request_token: first_request.request_token,
                 search_token: first_request.search_token,
-                phase: PageLoadPhase::Incremental,
                 page: Ok(page(
                     vec![make_row("/tmp/beta.jsonl", "2025-01-02T00:00:00Z", "beta")],
                     Some("2025-01-03T00:00:00Z"),
@@ -6816,7 +6792,6 @@ session_picker_view = "dense"
             .handle_background_event(BackgroundEvent::Page {
                 request_token: second_request.request_token,
                 search_token: second_request.search_token,
-                phase: PageLoadPhase::Incremental,
                 page: Ok(page(
                     vec![make_row(
                         "/tmp/match.jsonl",
@@ -6846,7 +6821,6 @@ session_picker_view = "dense"
             .handle_background_event(BackgroundEvent::Page {
                 request_token: second_request.request_token,
                 search_token: second_request.search_token,
-                phase: PageLoadPhase::Incremental,
                 page: Ok(page(
                     Vec::new(),
                     /*next_cursor*/ None,
@@ -6862,7 +6836,6 @@ session_picker_view = "dense"
             .handle_background_event(BackgroundEvent::Page {
                 request_token: active_request.request_token,
                 search_token: active_request.search_token,
-                phase: PageLoadPhase::Incremental,
                 page: Ok(page(
                     Vec::new(),
                     /*next_cursor*/ None,

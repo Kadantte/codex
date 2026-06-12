@@ -32,7 +32,10 @@ fn push_visible_message(messages: &mut Vec<ResponseItem>, item: &ResponseItem) {
             messages.push(item.clone());
         }
         ResponseItem::AgentMessage {
-            author, content, ..
+            author,
+            content,
+            metadata,
+            ..
         } => {
             let text = content
                 .iter()
@@ -50,6 +53,7 @@ fn push_visible_message(messages: &mut Vec<ResponseItem>, item: &ResponseItem) {
                         text: format!("Agent message from {author}:\n{text}"),
                     }],
                     phase: None,
+                    metadata: metadata.clone(),
                 });
             }
         }

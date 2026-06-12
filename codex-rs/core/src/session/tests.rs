@@ -3311,7 +3311,7 @@ async fn set_rate_limits_retains_previous_credits() {
         user_shell_override: None,
     };
 
-    let mut state = SessionState::new(session_configuration);
+    let mut state = session_state_for_tests(session_configuration).await;
     let initial = RateLimitSnapshot {
         limit_id: None,
         limit_name: None,
@@ -3418,7 +3418,7 @@ async fn set_rate_limits_updates_plan_type_when_present() {
         user_shell_override: None,
     };
 
-    let mut state = SessionState::new(session_configuration);
+    let mut state = session_state_for_tests(session_configuration).await;
     let initial = RateLimitSnapshot {
         limit_id: None,
         limit_name: None,
@@ -4030,21 +4030,20 @@ async fn emit_subagent_session_started_includes_fork_lineage_from_session_config
     );
 }
 
-fn turn_environments_for_tests(
-    environment: &Arc<codex_exec_server::Environment>,
-    cwd: &codex_utils_absolute_path::AbsolutePathBuf,
-) -> crate::environment_selection::ResolvedTurnEnvironments {
-    crate::environment_selection::ResolvedTurnEnvironments {
-        turn_environments: vec![
-            TurnEnvironment::new(
-                codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
-                Arc::clone(environment),
-                cwd.clone(),
-                /*shell*/ None,
-            )
-            .expect("turn environment"),
-        ],
-    }
+async fn turn_environments_for_configuration(
+    session_configuration: &SessionConfiguration,
+) -> TurnEnvironments {
+    TurnEnvironments::resolve(
+        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+        session_configuration.environment_selections(),
+    )
+    .await
+    .expect("environment selections should resolve")
+}
+
+async fn session_state_for_tests(session_configuration: SessionConfiguration) -> SessionState {
+    let turn_environments = turn_environments_for_configuration(&session_configuration).await;
+    SessionState::new(session_configuration, turn_environments)
 }
 
 #[tokio::test]
@@ -4406,7 +4405,7 @@ async fn active_profile_update_rebuilds_network_proxy_config() -> std::io::Resul
 #[cfg_attr(windows, ignore)]
 #[tokio::test]
 async fn new_default_turn_uses_config_aware_skills_for_role_overrides() {
-    let (session, _turn_context) = make_session_and_context().await;
+    let (session, turn_context) = make_session_and_context().await;
     let parent_config = session.get_config().await;
     let codex_home = parent_config.codex_home.clone();
     let skill_dir = codex_home.join("skills").join("demo");
@@ -4418,11 +4417,9 @@ async fn new_default_turn_uses_config_aware_skills_for_role_overrides() {
     )
     .expect("write skill");
 
-    let skill_fs = session
-        .services
-        .environment_manager
-        .default_environment()
-        .map(|environment| environment.get_filesystem())
+    let skill_fs = turn_context
+        .environments
+        .primary_filesystem()
         .unwrap_or_else(|| std::sync::Arc::clone(&codex_exec_server::LOCAL_FS));
     let parent_outcome = session
         .services
@@ -4651,8 +4648,7 @@ async fn session_update_settings_does_not_rewrite_sticky_environment_cwds() {
 async fn relative_cwd_update_without_environments_resolves_under_session_cwd() {
     let (session, _turn_context) = make_session_and_context().await;
     let original_cwd = {
-        let mut state = session.state.lock().await;
-        state.session_configuration.environments.environments = Vec::new();
+        let state = session.state.lock().await;
         state.session_configuration.cwd().clone()
     };
     let updated_cwd = original_cwd.join("project");
@@ -4813,6 +4809,7 @@ async fn session_new_fails_when_zsh_fork_enabled_without_packaged_zsh() {
         config.codex_home.clone(),
         /*bundled_skills_enabled*/ true,
     ));
+    let turn_environments = turn_environments_for_configuration(&session_configuration).await;
     let result = Session::new(
         session_configuration,
         Arc::clone(&config),
@@ -4830,7 +4827,7 @@ async fn session_new_fails_when_zsh_fork_enabled_without_packaged_zsh() {
         Arc::new(codex_extension_api::ExtensionRegistryBuilder::new().build()),
         codex_extension_api::ExtensionDataInit::default(),
         AgentControl::default(),
-        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+        turn_environments,
         /*analytics_events_client*/ None,
         Arc::new(codex_thread_store::LocalThreadStore::new(
             codex_thread_store::LocalThreadStoreConfig::from_config(config.as_ref()),
@@ -4925,7 +4922,11 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         session_configuration.session_source.clone(),
     );
 
-    let state = SessionState::new(session_configuration.clone());
+    let state = session_state_for_tests(session_configuration.clone()).await;
+    let turn_environments = state.turn_environments.clone();
+    let environment = turn_environments
+        .primary_environment()
+        .expect("primary environment");
     let plugins_manager = Arc::new(PluginsManager::new(config.codex_home.to_path_buf()));
     let mcp_manager = Arc::new(McpManager::new(Arc::clone(&plugins_manager)));
     let skills_manager = Arc::new(SkillsManager::new(
@@ -4933,11 +4934,6 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         /*bundled_skills_enabled*/ true,
     ));
     let network_approval = Arc::new(NetworkApprovalService::default());
-    let environment = Arc::new(
-        codex_exec_server::Environment::create_for_tests(/*exec_server_url*/ None)
-            .expect("create environment"),
-    );
-
     let services = SessionServices {
         mcp_connection_manager: Arc::new(arc_swap::ArcSwap::from_pointee(
             McpConnectionManager::new_uninitialized_with_permission_profile(
@@ -5006,7 +5002,6 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
             /*attestation_provider*/ None,
         ),
         code_mode_service: crate::tools::code_mode::CodeModeService::new(),
-        environment_manager: Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
     };
 
     let plugin_outcome = services
@@ -5023,7 +5018,6 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
             .skills_for_config(&skills_input, Some(Arc::clone(&skill_fs)))
             .await,
     );
-    let turn_environments = turn_environments_for_tests(&environment, session_configuration.cwd());
     let turn_context = Session::make_turn_context(
         thread_id,
         SessionId::from(thread_id),
@@ -5151,6 +5145,7 @@ async fn make_session_with_config_and_rx(
         config.codex_home.clone(),
         /*bundled_skills_enabled*/ true,
     ));
+    let turn_environments = turn_environments_for_configuration(&session_configuration).await;
 
     let session = Session::new(
         session_configuration,
@@ -5169,7 +5164,7 @@ async fn make_session_with_config_and_rx(
         Arc::new(codex_extension_api::ExtensionRegistryBuilder::new().build()),
         codex_extension_api::ExtensionDataInit::default(),
         AgentControl::default(),
-        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+        turn_environments,
         /*analytics_events_client*/ None,
         Arc::new(codex_thread_store::LocalThreadStore::new(
             codex_thread_store::LocalThreadStoreConfig::from_config(config.as_ref()),
@@ -5253,6 +5248,7 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
         config.codex_home.clone(),
         /*bundled_skills_enabled*/ true,
     ));
+    let turn_environments = turn_environments_for_configuration(&session_configuration).await;
 
     let session = Session::new(
         session_configuration,
@@ -5271,7 +5267,7 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
         Arc::new(codex_extension_api::ExtensionRegistryBuilder::new().build()),
         codex_extension_api::ExtensionDataInit::default(),
         agent_control,
-        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+        turn_environments,
         /*analytics_events_client*/ None,
         Arc::new(codex_thread_store::LocalThreadStore::new(
             codex_thread_store::LocalThreadStoreConfig::from_config(config.as_ref()),
@@ -6196,6 +6192,28 @@ async fn turn_environments_set_primary_environment() {
     let turn_cwd = turn_context.cwd.clone();
     assert_eq!(turn_cwd.as_path(), selected_cwd.as_path());
     assert_eq!(turn_context.config.cwd.as_path(), selected_cwd.as_path());
+
+    let stored_environment = {
+        let state = session.state.lock().await;
+        state
+            .turn_environments
+            .primary_environment()
+            .expect("stored primary environment")
+    };
+    assert!(Arc::ptr_eq(
+        &stored_environment,
+        &turn_environment.environment
+    ));
+
+    let default_turn = session.new_default_turn().await;
+    assert!(Arc::ptr_eq(
+        &stored_environment,
+        &default_turn
+            .environments
+            .primary()
+            .expect("default turn primary environment")
+            .environment
+    ));
 }
 
 #[tokio::test]
@@ -6204,10 +6222,18 @@ async fn default_turn_does_not_overlay_legacy_fallback_cwd_onto_stored_thread_en
     let session_cwd = session.get_config().await.cwd.clone();
     let selected_cwd =
         AbsolutePathBuf::try_from(session_cwd.as_path().join("selected")).expect("absolute path");
+    let turn_environments = {
+        let state = session.state.lock().await;
+        state.turn_environments.clone()
+    }
+    .with_selections(&[local(selected_cwd.clone())])
+    .await
+    .expect("environment selection should resolve");
 
     {
         let mut state = session.state.lock().await;
         state.session_configuration.environments.environments = vec![local(selected_cwd.clone())];
+        state.turn_environments = turn_environments;
     }
 
     let turn_context = session.new_default_turn().await;
@@ -6236,6 +6262,7 @@ async fn default_turn_honors_empty_stored_thread_environments() {
     {
         let mut state = session.state.lock().await;
         state.session_configuration.environments.environments = Vec::new();
+        state.turn_environments.turn_environments.clear();
     }
 
     let turn_context = session.new_default_turn().await;
@@ -6931,7 +6958,11 @@ where
         session_configuration.session_source.clone(),
     );
 
-    let state = SessionState::new(session_configuration.clone());
+    let state = session_state_for_tests(session_configuration.clone()).await;
+    let turn_environments = state.turn_environments.clone();
+    let environment = turn_environments
+        .primary_environment()
+        .expect("primary environment");
     let plugins_manager = Arc::new(PluginsManager::new(config.codex_home.to_path_buf()));
     let mcp_manager = Arc::new(McpManager::new(Arc::clone(&plugins_manager)));
     let skills_manager = Arc::new(SkillsManager::new(
@@ -6939,11 +6970,6 @@ where
         /*bundled_skills_enabled*/ true,
     ));
     let network_approval = Arc::new(NetworkApprovalService::default());
-    let environment = Arc::new(
-        codex_exec_server::Environment::create_for_tests(/*exec_server_url*/ None)
-            .expect("create environment"),
-    );
-
     let services = SessionServices {
         mcp_connection_manager: Arc::new(arc_swap::ArcSwap::from_pointee(
             McpConnectionManager::new_uninitialized_with_permission_profile(
@@ -7012,7 +7038,6 @@ where
             /*attestation_provider*/ None,
         ),
         code_mode_service: crate::tools::code_mode::CodeModeService::new(),
-        environment_manager: Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
     };
 
     let plugin_outcome = services
@@ -7029,7 +7054,6 @@ where
             .skills_for_config(&skills_input, Some(Arc::clone(&skill_fs)))
             .await,
     );
-    let turn_environments = turn_environments_for_tests(&environment, session_configuration.cwd());
     let turn_context = Arc::new(Session::make_turn_context(
         thread_id,
         SessionId::from(thread_id),

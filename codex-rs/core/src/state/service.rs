@@ -20,7 +20,6 @@ use arc_swap::ArcSwap;
 use arc_swap::ArcSwapOption;
 use codex_analytics::AnalyticsEventsClient;
 use codex_core_plugins::PluginsManager;
-use codex_exec_server::EnvironmentManager;
 use codex_extension_api::ExtensionData;
 use codex_extension_api::ExtensionDataInit;
 use codex_extension_api::ExtensionRegistry;
@@ -81,9 +80,6 @@ pub(crate) struct SessionServices {
     /// Session-scoped model client shared across turns.
     pub(crate) model_client: ModelClient,
     pub(crate) code_mode_service: CodeModeService,
-    /// Shared process-level environment registry. Sessions carry an `Arc` handle so they can pass
-    /// the same manager through child-thread spawn paths without reconstructing it.
-    pub(crate) environment_manager: Arc<EnvironmentManager>,
 }
 
 impl SessionServices {

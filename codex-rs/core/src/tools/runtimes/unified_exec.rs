@@ -10,6 +10,7 @@ use crate::exec::ExecExpiration;
 use crate::guardian::GuardianApprovalRequest;
 use crate::guardian::GuardianNetworkAccessTrigger;
 use crate::guardian::review_approval_request;
+use crate::plugin_script_lifecycle::PluginScriptExecution;
 use crate::sandboxing::ExecOptions;
 use crate::sandboxing::ExecServerEnvConfig;
 use crate::sandboxing::SandboxPermissions;
@@ -38,6 +39,8 @@ use crate::tools::sandboxing::managed_network_for_sandbox_permissions;
 use crate::tools::sandboxing::sandbox_permissions_preserving_denied_reads;
 use crate::tools::sandboxing::with_cached_approval;
 use crate::unified_exec::NoopSpawnLifecycle;
+use crate::unified_exec::SpawnLifecycle;
+use crate::unified_exec::SpawnLifecycleHandle;
 use crate::unified_exec::UnifiedExecError;
 use crate::unified_exec::UnifiedExecProcess;
 use crate::unified_exec::UnifiedExecProcessManager;
@@ -96,6 +99,62 @@ pub struct UnifiedExecApprovalKey {
 pub struct UnifiedExecRuntime<'a> {
     manager: &'a UnifiedExecProcessManager,
     shell_mode: UnifiedExecShellMode,
+}
+
+struct PluginScriptSpawnLifecycle {
+    inner: SpawnLifecycleHandle,
+    plugin_script: Arc<PluginScriptExecution>,
+}
+
+impl std::fmt::Debug for PluginScriptSpawnLifecycle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PluginScriptSpawnLifecycle")
+            .field("inner", &self.inner)
+            .field("plugin_script", &"tracked")
+            .finish()
+    }
+}
+
+impl SpawnLifecycle for PluginScriptSpawnLifecycle {
+    fn inherited_fds(&self) -> Vec<i32> {
+        self.inner.inherited_fds()
+    }
+
+    fn after_spawn(&mut self) {
+        self.inner.after_spawn();
+        self.plugin_script.mark_started();
+    }
+
+    fn mark_cancelled(&self) {
+        self.inner.mark_cancelled();
+        self.plugin_script.mark_cancelled();
+    }
+
+    fn finish(&self, exit_code: Option<i32>, failed: bool) {
+        self.inner.finish(exit_code, failed);
+        self.plugin_script.finish(exit_code, failed);
+    }
+}
+
+impl Drop for PluginScriptSpawnLifecycle {
+    fn drop(&mut self) {
+        self.plugin_script
+            .finish(/*exit_code*/ None, /*failed*/ true);
+    }
+}
+
+fn wrap_spawn_lifecycle(
+    inner: SpawnLifecycleHandle,
+    plugin_script: Option<&Arc<PluginScriptExecution>>,
+) -> SpawnLifecycleHandle {
+    match plugin_script {
+        Some(plugin_script) => Box::new(PluginScriptSpawnLifecycle {
+            inner,
+            plugin_script: Arc::clone(plugin_script),
+        }),
+        None => inner,
+    }
 }
 
 fn unified_exec_options(
@@ -278,6 +337,20 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecProcess> for UnifiedExecRunt
             network.apply_to_env(&mut env);
         }
         let environment_is_remote = req.environment.is_remote();
+        // Plugin roots and cwd are local Codex paths. Resolving them before the
+        // remote exec-server decision can miss or misattribute remote scripts,
+        // so only attribute executions whose process runs on this host.
+        let plugin_script = (!environment_is_remote)
+            .then(|| {
+                PluginScriptExecution::resolve(
+                    ctx.session.as_ref(),
+                    ctx.turn.as_ref(),
+                    &req.hook_command,
+                    &req.cwd,
+                    req.shell_type,
+                )
+            })
+            .flatten();
         let explicit_env_overrides = req.explicit_env_overrides.clone();
         #[cfg(unix)]
         let runtime_path_prepends = {
@@ -359,7 +432,7 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecProcess> for UnifiedExecRunt
                             req.process_id,
                             &prepared.exec_request,
                             req.tty,
-                            prepared.spawn_lifecycle,
+                            wrap_spawn_lifecycle(prepared.spawn_lifecycle, plugin_script.as_ref()),
                             req.environment.as_ref(),
                         )
                         .await
@@ -393,12 +466,14 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecProcess> for UnifiedExecRunt
             .env_for(command, options, managed_network)
             .map_err(ToolError::Codex)?;
         exec_env.exec_server_env_config = req.exec_server_env_config.clone();
+        let spawn_lifecycle =
+            wrap_spawn_lifecycle(Box::new(NoopSpawnLifecycle), plugin_script.as_ref());
         self.manager
             .open_session_with_exec_env(
                 req.process_id,
                 &exec_env,
                 req.tty,
-                Box::new(NoopSpawnLifecycle),
+                spawn_lifecycle,
                 req.environment.as_ref(),
             )
             .await

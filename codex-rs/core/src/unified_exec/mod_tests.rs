@@ -294,6 +294,7 @@ async fn blocking_terminate_unified_process(
                 }),
             },
             SandboxType::None,
+            Box::new(NoopSpawnLifecycle),
         )
         .await?,
     ))

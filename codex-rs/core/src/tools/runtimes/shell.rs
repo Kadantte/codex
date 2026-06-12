@@ -13,9 +13,10 @@ use crate::exec::ExecCapturePolicy;
 use crate::guardian::GuardianApprovalRequest;
 use crate::guardian::GuardianNetworkAccessTrigger;
 use crate::guardian::review_approval_request;
+use crate::plugin_script_lifecycle::PluginScriptExecution;
 use crate::sandboxing::ExecOptions;
 use crate::sandboxing::SandboxPermissions;
-use crate::sandboxing::execute_env;
+use crate::sandboxing::execute_exec_request_with_after_spawn;
 use crate::shell::ShellType;
 use crate::tools::flat_tool_name;
 use crate::tools::network_approval::NetworkApprovalMode;
@@ -40,6 +41,8 @@ use crate::tools::sandboxing::managed_network_for_sandbox_permissions;
 use crate::tools::sandboxing::sandbox_permissions_preserving_denied_reads;
 use crate::tools::sandboxing::with_cached_approval;
 use codex_network_proxy::NetworkProxy;
+use codex_protocol::error::CodexErr;
+use codex_protocol::error::SandboxErr;
 use codex_protocol::exec_output::ExecToolCallOutput;
 use codex_protocol::models::AdditionalPermissionProfile;
 use codex_protocol::protocol::ReviewDecision;
@@ -48,6 +51,7 @@ use codex_shell_command::powershell::prefix_powershell_script_with_utf8;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use futures::future::BoxFuture;
 use std::collections::HashMap;
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 #[derive(Clone, Debug)]
@@ -87,6 +91,26 @@ pub(crate) enum ShellRuntimeBackend {
 
 pub struct ShellRuntime {
     backend: ShellRuntimeBackend,
+}
+
+fn finish_plugin_script(
+    result: Result<ExecToolCallOutput, ToolError>,
+    plugin_script: Option<&Arc<PluginScriptExecution>>,
+    cancelled: bool,
+) -> Result<ExecToolCallOutput, ToolError> {
+    if let Some(execution) = plugin_script {
+        if cancelled {
+            execution.mark_cancelled();
+        }
+        match &result {
+            Ok(out) => execution.finish(Some(out.exit_code), out.timed_out),
+            Err(ToolError::Codex(CodexErr::Sandbox(
+                SandboxErr::Denied { output, .. } | SandboxErr::Timeout { output },
+            ))) => execution.finish(Some(output.exit_code), /*failed*/ true),
+            Err(_) => execution.finish(/*exit_code*/ None, /*failed*/ true),
+        }
+    }
+    result
 }
 
 #[derive(serde::Serialize, Clone, Debug, Eq, PartialEq, Hash)]
@@ -240,6 +264,13 @@ impl ToolRuntime<ShellRequest, ExecToolCallOutput> for ShellRuntime {
         ctx: &ToolCtx,
     ) -> Result<ExecToolCallOutput, ToolError> {
         let session_shell = ctx.session.user_shell();
+        let plugin_script = PluginScriptExecution::resolve(
+            ctx.session.as_ref(),
+            ctx.turn.as_ref(),
+            &req.hook_command,
+            &req.cwd,
+            req.shell_type.unwrap_or(session_shell.shell_type),
+        );
         let (file_system_sandbox_policy, _) = attempt.permissions.to_runtime_permissions();
         let sandbox_permissions = sandbox_permissions_preserving_denied_reads(
             req.sandbox_permissions,
@@ -287,9 +318,30 @@ impl ToolRuntime<ShellRequest, ExecToolCallOutput> for ShellRuntime {
         };
 
         if self.backend == ShellRuntimeBackend::ShellCommandZshFork {
-            match zsh_fork_backend::maybe_run_shell_command(req, attempt, ctx, &command).await? {
-                Some(out) => return Ok(out),
-                None => {
+            match zsh_fork_backend::maybe_run_shell_command(
+                req,
+                attempt,
+                ctx,
+                &command,
+                plugin_script.clone(),
+            )
+            .await
+            {
+                Ok(Some(out)) => {
+                    return finish_plugin_script(
+                        Ok(out),
+                        plugin_script.as_ref(),
+                        req.cancellation_token.is_cancelled(),
+                    );
+                }
+                Err(err) => {
+                    return finish_plugin_script(
+                        Err(err),
+                        plugin_script.as_ref(),
+                        req.cancellation_token.is_cancelled(),
+                    );
+                }
+                Ok(None) => {
                     tracing::warn!(
                         "ZshFork backend specified, but conditions for using it were not met, falling back to normal execution",
                     );
@@ -311,9 +363,18 @@ impl ToolRuntime<ShellRequest, ExecToolCallOutput> for ShellRuntime {
         let env = attempt
             .env_for(command, options, managed_network)
             .map_err(ToolError::Codex)?;
-        let out = execute_env(env, Self::stdout_stream(ctx))
-            .await
-            .map_err(ToolError::Codex)?;
-        Ok(out)
+        let after_spawn = plugin_script.as_ref().map(|plugin_script| {
+            let plugin_script = Arc::clone(plugin_script);
+            Box::new(move || plugin_script.mark_started()) as Box<dyn FnOnce() + Send>
+        });
+        let result =
+            execute_exec_request_with_after_spawn(env, Self::stdout_stream(ctx), after_spawn)
+                .await
+                .map_err(ToolError::Codex);
+        finish_plugin_script(
+            result,
+            plugin_script.as_ref(),
+            req.cancellation_token.is_cancelled(),
+        )
     }
 }

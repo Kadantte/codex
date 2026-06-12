@@ -1627,9 +1627,9 @@
             },
             "method": {
               "enum": [
-                "thread/catalog/subscribe"
+                "threadCatalog/subscribe"
               ],
-              "title": "Thread/catalog/subscribeRequestMethod",
+              "title": "ThreadCatalog/subscribeRequestMethod",
               "type": "string"
             },
             "params": {
@@ -1640,7 +1640,7 @@
             "id",
             "method"
           ],
-          "title": "Thread/catalog/subscribeRequest",
+          "title": "ThreadCatalog/subscribeRequest",
           "type": "object"
         },
         {
@@ -1650,9 +1650,9 @@
             },
             "method": {
               "enum": [
-                "thread/catalog/unsubscribe"
+                "threadCatalog/unsubscribe"
               ],
-              "title": "Thread/catalog/unsubscribeRequestMethod",
+              "title": "ThreadCatalog/unsubscribeRequestMethod",
               "type": "string"
             },
             "params": {
@@ -1663,7 +1663,7 @@
             "id",
             "method"
           ],
-          "title": "Thread/catalog/unsubscribeRequest",
+          "title": "ThreadCatalog/unsubscribeRequest",
           "type": "object"
         },
         {
@@ -11854,9 +11854,9 @@
           "properties": {
             "method": {
               "enum": [
-                "thread/catalog/changed"
+                "threadCatalog/changed"
               ],
-              "title": "Thread/catalog/changedNotificationMethod",
+              "title": "ThreadCatalog/changedNotificationMethod",
               "type": "string"
             },
             "params": {
@@ -11867,7 +11867,7 @@
             "method",
             "params"
           ],
-          "title": "Thread/catalog/changedNotification",
+          "title": "ThreadCatalog/changedNotification",
           "type": "object"
         },
         {
@@ -16516,6 +16516,10 @@
           "format": "int64",
           "type": "integer"
         },
+        "createdAtMs": {
+          "format": "int64",
+          "type": "integer"
+        },
         "cwd": {
           "$ref": "#/definitions/AbsolutePathBuf"
         },
@@ -16584,11 +16588,16 @@
         "updatedAt": {
           "format": "int64",
           "type": "integer"
+        },
+        "updatedAtMs": {
+          "format": "int64",
+          "type": "integer"
         }
       },
       "required": [
         "cliVersion",
         "createdAt",
+        "createdAtMs",
         "cwd",
         "ephemeral",
         "id",
@@ -16596,7 +16605,8 @@
         "preview",
         "sessionId",
         "source",
-        "updatedAt"
+        "updatedAt",
+        "updatedAtMs"
       ],
       "type": "object"
     },

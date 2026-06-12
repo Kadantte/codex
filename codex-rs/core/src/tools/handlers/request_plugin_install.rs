@@ -168,17 +168,6 @@ impl RequestPluginInstallHandler {
                 .map(|entry| entry.result(false))
                 .collect()
         };
-        let installed_entries = entries
-            .iter()
-            .filter(|entry| entry.completed)
-            .map(|entry| RequestPluginInstallInstalledEntry {
-                category_id: entry.category_id.clone(),
-                entry_id: entry.entry_id.clone(),
-                tool_id: entry.tool_id.clone(),
-                tool_type: entry.tool_type,
-            })
-            .collect::<Vec<_>>();
-
         let completed_connector_ids = requested_entries
             .iter()
             .zip(entries.iter())
@@ -222,7 +211,6 @@ impl RequestPluginInstallHandler {
             completed,
             user_confirmed,
             action_type,
-            installed_entries,
             entries,
         })
         .map_err(|err| {
@@ -242,16 +230,12 @@ impl CoreToolRuntime for RequestPluginInstallHandler {}
 
 #[derive(Clone)]
 struct RequestedPickerInstallEntry {
-    category_id: Option<String>,
-    entry_id: String,
     tool: DiscoverableTool,
 }
 
 impl RequestedPickerInstallEntry {
     fn result(&self, completed: bool) -> RequestPluginInstallEntryResult {
         RequestPluginInstallEntryResult {
-            category_id: self.category_id.clone(),
-            entry_id: self.entry_id.clone(),
             tool_type: self.tool.tool_type(),
             tool_id: self.tool.id().to_string(),
             tool_name: self.tool.name().to_string(),
@@ -284,7 +268,7 @@ fn validate_request_plugin_install_picker_args<'a>(
     }
 
     let mut resolved_entries = Vec::new();
-    let mut seen_entry_keys = HashSet::new();
+    let mut seen_tools = HashSet::new();
 
     match (&args.entries, &args.categories) {
         (Some(entries), None) => {
@@ -294,7 +278,7 @@ fn validate_request_plugin_install_picker_args<'a>(
                     entry,
                     discoverable_tools,
                     app_server_client_name,
-                    &mut seen_entry_keys,
+                    &mut seen_tools,
                 )?);
             }
             if resolved_entries.is_empty() {
@@ -308,7 +292,7 @@ fn validate_request_plugin_install_picker_args<'a>(
                 categories,
                 discoverable_tools,
                 app_server_client_name,
-                &mut seen_entry_keys,
+                &mut seen_tools,
                 &mut resolved_entries,
             )?;
         }
@@ -327,7 +311,7 @@ fn validate_request_plugin_install_picker_categories<'a>(
     categories: &'a [RequestPluginInstallPickerCategory],
     discoverable_tools: &'a [DiscoverableTool],
     app_server_client_name: Option<&str>,
-    seen_entry_keys: &mut HashSet<(String, String)>,
+    seen_tools: &mut HashSet<(DiscoverableToolType, String)>,
     resolved_entries: &mut Vec<RequestPluginInstallResolvedPickerEntry<'a>>,
 ) -> Result<(), FunctionCallError> {
     if categories.is_empty() {
@@ -347,14 +331,13 @@ fn validate_request_plugin_install_picker_categories<'a>(
                 "categories[].entries must include at least one install candidate".to_string(),
             ));
         }
-        let category_id = request_plugin_install_category_id(category_index);
         for entry in &category.entries {
             resolved_entries.push(validate_request_plugin_install_picker_entry(
-                Some(category_id.clone()),
+                Some(category_index),
                 entry,
                 discoverable_tools,
                 app_server_client_name,
-                seen_entry_keys,
+                seen_tools,
             )?);
         }
     }
@@ -363,11 +346,11 @@ fn validate_request_plugin_install_picker_categories<'a>(
 }
 
 fn validate_request_plugin_install_picker_entry<'a>(
-    category_id: Option<String>,
+    category_index: Option<usize>,
     entry: &'a RequestPluginInstallPickerEntry,
     discoverable_tools: &'a [DiscoverableTool],
     app_server_client_name: Option<&str>,
-    seen_entry_keys: &mut HashSet<(String, String)>,
+    seen_tools: &mut HashSet<(DiscoverableToolType, String)>,
 ) -> Result<RequestPluginInstallResolvedPickerEntry<'a>, FunctionCallError> {
     if entry.tool_id.trim().is_empty() {
         return Err(FunctionCallError::RespondToModel(
@@ -382,10 +365,9 @@ fn validate_request_plugin_install_picker_entry<'a>(
         ));
     }
 
-    let category_key = category_id.clone().unwrap_or_default();
-    if !seen_entry_keys.insert((category_key, entry.tool_id.clone())) {
+    if !seen_tools.insert((entry.tool_type, entry.tool_id.clone())) {
         return Err(FunctionCallError::RespondToModel(
-            "entries[].tool_id must be unique within each picker category".to_string(),
+            "picker install requests must not repeat a tool_type/tool_id pair".to_string(),
         ));
     }
 
@@ -399,8 +381,7 @@ fn validate_request_plugin_install_picker_entry<'a>(
     })?;
 
     Ok(RequestPluginInstallResolvedPickerEntry {
-        category_id,
-        entry_id: entry.tool_id.clone(),
+        category_index,
         tool,
     })
 }
@@ -411,8 +392,6 @@ fn requested_picker_install_entries(
     resolved_entries
         .iter()
         .map(|entry| RequestedPickerInstallEntry {
-            category_id: entry.category_id.clone(),
-            entry_id: entry.entry_id.clone(),
             tool: entry.tool.clone(),
         })
         .collect()
@@ -578,9 +557,7 @@ fn response_reports_picker_entry_completed(
     requested_entry: &RequestedPickerInstallEntry,
 ) -> bool {
     response_installed_entries.iter().any(|installed_entry| {
-        installed_entry.category_id == requested_entry.category_id
-            && installed_entry.entry_id == requested_entry.entry_id
-            && installed_entry.tool_id == requested_entry.tool.id()
+        installed_entry.tool_id == requested_entry.tool.id()
             && installed_entry.tool_type == requested_entry.tool.tool_type()
     })
 }
@@ -594,10 +571,6 @@ fn tool_type_str(tool_type: DiscoverableToolType) -> &'static str {
         DiscoverableToolType::Connector => "connector",
         DiscoverableToolType::Plugin => "plugin",
     }
-}
-
-fn request_plugin_install_category_id(category_index: usize) -> String {
-    format!("category-{category_index}")
 }
 
 fn is_remote_plugin_install_suggestion(plugin_id: &str) -> bool {

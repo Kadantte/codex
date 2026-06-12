@@ -182,6 +182,9 @@ async fn standalone_web_search_round_trips_output() -> Result<()> {
                 "type": "input_text",
                 "text": "Search result",
             }],
+            "metadata": {
+                "turn_id": turn_id,
+            },
         })
     );
     assert_eq!(

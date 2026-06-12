@@ -2949,7 +2949,6 @@ enabled = true
 async fn list_marketplaces_includes_curated_repo_marketplace() {
     let tmp = tempfile::tempdir().unwrap();
     let curated_root = curated_plugins_repo_path(tmp.path());
-    let plugin_root = curated_root.join("plugins/linear");
 
     write_file(
         &tmp.path().join(CONFIG_TOML_FILE),
@@ -2958,7 +2957,6 @@ plugins = true
 "#,
     );
     fs::create_dir_all(curated_root.join(".agents/plugins")).unwrap();
-    fs::create_dir_all(plugin_root.join(".codex-plugin")).unwrap();
     fs::write(
         curated_root.join(".agents/plugins/marketplace.json"),
         r#"{
@@ -2975,11 +2973,7 @@ plugins = true
 }"#,
     )
     .unwrap();
-    fs::write(
-        plugin_root.join(".codex-plugin/plugin.json"),
-        r#"{"name":"linear"}"#,
-    )
-    .unwrap();
+    write_plugin(&curated_root, "plugins/linear", "linear");
 
     let config = load_config(tmp.path(), tmp.path()).await;
     let marketplaces = PluginsManager::new(tmp.path().to_path_buf())
@@ -3070,7 +3064,6 @@ source = "/tmp/debug"
 "#,
     );
     fs::create_dir_all(marketplace_root.join(".agents/plugins")).unwrap();
-    fs::create_dir_all(plugin_root.join(".codex-plugin")).unwrap();
     fs::write(
         marketplace_root.join(".agents/plugins/marketplace.json"),
         r#"{
@@ -3087,11 +3080,7 @@ source = "/tmp/debug"
 }"#,
     )
     .unwrap();
-    fs::write(
-        plugin_root.join(".codex-plugin/plugin.json"),
-        r#"{"name":"sample"}"#,
-    )
-    .unwrap();
+    write_plugin(&marketplace_root, "plugins/sample", "sample");
     let config = load_config(tmp.path(), tmp.path()).await;
     let marketplaces = PluginsManager::new(tmp.path().to_path_buf())
         .list_marketplaces_for_config(&config, &[], /*include_openai_curated*/ true)
@@ -3128,7 +3117,6 @@ source = "/tmp/debug"
 async fn list_marketplaces_uses_config_when_known_registry_is_malformed() {
     let tmp = tempfile::tempdir().unwrap();
     let marketplace_root = marketplace_install_root(tmp.path()).join("debug");
-    let plugin_root = marketplace_root.join("plugins/sample");
     let registry_path = tmp.path().join(".tmp/known_marketplaces.json");
 
     write_file(
@@ -3143,7 +3131,6 @@ source = "/tmp/debug"
 "#,
     );
     fs::create_dir_all(marketplace_root.join(".agents/plugins")).unwrap();
-    fs::create_dir_all(plugin_root.join(".codex-plugin")).unwrap();
     fs::write(
         marketplace_root.join(".agents/plugins/marketplace.json"),
         r#"{
@@ -3160,11 +3147,7 @@ source = "/tmp/debug"
 }"#,
     )
     .unwrap();
-    fs::write(
-        plugin_root.join(".codex-plugin/plugin.json"),
-        r#"{"name":"sample"}"#,
-    )
-    .unwrap();
+    write_plugin(&marketplace_root, "plugins/sample", "sample");
     fs::create_dir_all(registry_path.parent().unwrap()).unwrap();
     fs::write(registry_path, "{not valid json").unwrap();
 

@@ -26,6 +26,7 @@ use codex_exec_server::REMOTE_ENVIRONMENT_ID;
 use codex_features::Feature;
 use codex_utils_path_uri::NativePathString;
 use pretty_assertions::assert_eq;
+use serde_json::Value;
 use tempfile::TempDir;
 use tokio::io::AsyncBufReadExt;
 use tokio::io::BufReader;
@@ -33,7 +34,7 @@ use tokio::process::ChildStdout;
 use wine_test_support::WineTestCommand;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn app_server_accepts_windows_environment_cwd_under_wine() -> Result<()> {
+async fn app_server_preserves_windows_environment_context_under_wine() -> Result<()> {
     let executable = codex_utils_cargo_bin::cargo_bin("wine-windows-exec-server")?;
     let mut server = WineTestCommand::new(executable)
         .env("CODEX_HOME", r"C:\codex-home")
@@ -122,6 +123,38 @@ async fn exercise_through_app_server(stdout: ChildStdout) -> Result<()> {
     )?;
     assert_eq!(completed.turn.id, turn.id);
     assert_eq!(completed.turn.status, TurnStatus::Completed);
+
+    let requests = responses_server
+        .received_requests()
+        .await
+        .context("failed to fetch received requests")?;
+    let model_request = requests
+        .iter()
+        .find(|request| request.url.path().ends_with("/responses"))
+        .context("expected model request")?;
+    let model_request_body = model_request
+        .body_json::<Value>()
+        .context("model request body should be JSON")?;
+    let environment_context = model_request_body["input"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|item| item.get("role").and_then(Value::as_str) == Some("user"))
+        .filter_map(|item| item.get("content").and_then(Value::as_array))
+        .flatten()
+        .filter(|span| span.get("type").and_then(Value::as_str) == Some("input_text"))
+        .filter_map(|span| span.get("text").and_then(Value::as_str))
+        .find(|text| text.starts_with("<environment_context>"))
+        .context("environment context should be model visible")?;
+    assert!(environment_context.contains(r"<cwd>C:\workspace</cwd>"));
+    assert!(
+        environment_context.contains("<shell>cmd</shell>")
+            || environment_context.contains("<shell>powershell</shell>"),
+        "unexpected Windows shell context: {environment_context}"
+    );
+    assert!(!environment_context.contains("/C:/workspace"));
+    assert!(!environment_context.contains("bash"));
+    assert!(!environment_context.contains("/bin/"));
 
     Ok(())
 }

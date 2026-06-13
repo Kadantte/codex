@@ -35,27 +35,21 @@ impl TurnEnvironments {
     pub(crate) async fn resolve(
         environment_manager: Arc<EnvironmentManager>,
         environments: &[TurnEnvironmentSelection],
-    ) -> CodexResult<Self> {
-        Self {
+    ) -> Self {
+        let mut resolved = Self {
             environment_manager,
             turn_environments: Vec::new(),
-        }
-        .with_selections(environments)
-        .await
+        };
+        resolved.update_selections(environments).await;
+        resolved
     }
 
-    pub(crate) async fn with_selections(
-        &self,
-        environments: &[TurnEnvironmentSelection],
-    ) -> CodexResult<Self> {
+    pub(crate) async fn update_selections(&mut self, environments: &[TurnEnvironmentSelection]) {
         let mut seen_environment_ids = HashSet::with_capacity(environments.len());
         let mut turn_environments = Vec::with_capacity(environments.len());
         for selected_environment in environments {
             if !seen_environment_ids.insert(selected_environment.environment_id.as_str()) {
-                return Err(CodexErr::InvalidRequest(format!(
-                    "duplicate turn environment id `{}`",
-                    selected_environment.environment_id
-                )));
+                continue;
             }
             let turn_environment = match self.turn_environments.iter().find(|environment| {
                 environment.environment_id == selected_environment.environment_id
@@ -75,10 +69,7 @@ impl TurnEnvironments {
             };
             turn_environments.push(turn_environment);
         }
-        Ok(Self {
-            environment_manager: Arc::clone(&self.environment_manager),
-            turn_environments,
-        })
+        self.turn_environments = turn_environments;
     }
 
     async fn resolve_selection(
@@ -229,27 +220,27 @@ url = "ws://127.0.0.1:8765"
     }
 
     #[tokio::test]
-    async fn resolve_environment_selections_rejects_duplicate_ids() {
+    async fn resolve_environment_selections_keeps_first_duplicate_id() {
         let cwd = AbsolutePathBuf::current_dir().expect("cwd");
         let manager = Arc::new(EnvironmentManager::default_for_tests());
+        let first = TurnEnvironmentSelection {
+            environment_id: LOCAL_ENVIRONMENT_ID.to_string(),
+            cwd: cwd.clone(),
+        };
 
-        let err = TurnEnvironments::resolve(
+        let resolved = TurnEnvironments::resolve(
             manager,
             &[
+                first.clone(),
                 TurnEnvironmentSelection {
-                    environment_id: "local".to_string(),
-                    cwd: cwd.clone(),
-                },
-                TurnEnvironmentSelection {
-                    environment_id: "local".to_string(),
+                    environment_id: LOCAL_ENVIRONMENT_ID.to_string(),
                     cwd: cwd.join("other"),
                 },
             ],
         )
-        .await
-        .expect_err("duplicate environment id should fail");
+        .await;
 
-        assert!(err.to_string().contains("duplicate"));
+        assert_eq!(resolved.to_selections(), vec![first]);
     }
 
     #[tokio::test]
@@ -265,8 +256,7 @@ url = "ws://127.0.0.1:8765"
                 cwd: selected_cwd,
             }],
         )
-        .await
-        .expect("environment selections should resolve");
+        .await;
 
         assert_eq!(
             resolved
@@ -311,8 +301,7 @@ url = "ws://127.0.0.1:8765"
                 local.clone(),
             ],
         )
-        .await
-        .expect("valid environment selections should resolve");
+        .await;
 
         assert_eq!(resolved.to_selections(), vec![local]);
     }
@@ -331,9 +320,7 @@ url = "ws://127.0.0.1:8765"
             environment_id: REMOTE_ENVIRONMENT_ID.to_string(),
             cwd: cwd.clone(),
         };
-        let initial = TurnEnvironments::resolve(Arc::clone(&manager), &[selection.clone()])
-            .await
-            .expect("environment selection should resolve");
+        let initial = TurnEnvironments::resolve(Arc::clone(&manager), &[selection.clone()]).await;
         manager
             .upsert_environment(
                 REMOTE_ENVIRONMENT_ID.to_string(),
@@ -341,17 +328,17 @@ url = "ws://127.0.0.1:8765"
             )
             .expect("replace environment");
 
-        let reused = initial
-            .with_selections(std::slice::from_ref(&selection))
-            .await
-            .expect("matching environment selection should resolve");
-        let changed = reused
-            .with_selections(&[TurnEnvironmentSelection {
+        let mut reused = initial.clone();
+        reused
+            .update_selections(std::slice::from_ref(&selection))
+            .await;
+        let mut changed = reused.clone();
+        changed
+            .update_selections(&[TurnEnvironmentSelection {
                 cwd: cwd.join("changed"),
                 ..selection
             }])
-            .await
-            .expect("changed environment selection should resolve");
+            .await;
 
         assert!(Arc::ptr_eq(
             &initial.primary().expect("initial environment").environment,
@@ -374,8 +361,7 @@ url = "ws://127.0.0.1:8765"
                 cwd: cwd.clone(),
             }],
         )
-        .await
-        .expect("local environment should resolve");
+        .await;
         let remote_environment = Arc::new(
             Environment::create_for_tests(Some("ws://127.0.0.1:8765".to_string()))
                 .expect("remote environment"),

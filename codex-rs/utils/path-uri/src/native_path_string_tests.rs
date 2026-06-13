@@ -169,3 +169,195 @@ fn serializes_as_a_string() {
         r#""/workspace/src/lib.rs""#
     );
 }
+
+#[test]
+fn raw_construction_and_deserialization_preserve_foreign_spelling() {
+    let expected = NativePathString::new(r"C:\workspace\project");
+    let deserialized: NativePathString =
+        serde_json::from_str(r#""C:\\workspace\\project""#).expect("native path string");
+
+    assert_eq!(deserialized, expected);
+    assert_eq!(deserialized.as_str(), r"C:\workspace\project");
+}
+
+#[test]
+fn posix_native_paths_round_trip_through_path_uri() {
+    for value in [
+        "/",
+        "/home/alice/a file.rs",
+        "/tmp/",
+        "/tmp/%A0.txt",
+        "/tmp/☃",
+        "/tmp/a\\b",
+    ] {
+        let native = NativePathString::new(value);
+        let path = native
+            .to_path_uri(PathConvention::Posix)
+            .expect("absolute POSIX path should parse");
+
+        assert_eq!(
+            NativePathString::from_path_uri(&path, PathConvention::Posix),
+            Ok(native),
+            "round-tripping {value}"
+        );
+    }
+}
+
+#[test]
+fn windows_native_paths_round_trip_through_path_uri() {
+    for value in [
+        r"C:\",
+        r"C:\Users\Alice Smith\src\main.rs",
+        r"d:\snowman\☃",
+        r"C:\test with %25\c#code",
+        r"\\server\share\src\main.rs",
+        "\\\\server\\share\\",
+    ] {
+        let native = NativePathString::new(value);
+        let path = native
+            .to_path_uri(PathConvention::Windows)
+            .expect("absolute Windows path should parse");
+
+        assert_eq!(
+            NativePathString::from_path_uri(&path, PathConvention::Windows),
+            Ok(native),
+            "round-tripping {value}"
+        );
+    }
+}
+
+#[test]
+fn native_path_strings_normalize_navigation_components() {
+    for (value, convention, expected_uri, expected_native) in [
+        (
+            "/workspace/src/../README.md",
+            PathConvention::Posix,
+            "file:///workspace/README.md",
+            "/workspace/README.md",
+        ),
+        (
+            "/../../workspace/./README.md",
+            PathConvention::Posix,
+            "file:///workspace/README.md",
+            "/workspace/README.md",
+        ),
+        (
+            r"C:\workspace\src\..\README.md",
+            PathConvention::Windows,
+            "file:///C:/workspace/README.md",
+            r"C:\workspace\README.md",
+        ),
+        (
+            r"\\server\share\src\..\README.md",
+            PathConvention::Windows,
+            "file://server/share/README.md",
+            r"\\server\share\README.md",
+        ),
+    ] {
+        let path = NativePathString::new(value)
+            .to_path_uri(convention)
+            .expect("absolute native path should parse");
+
+        assert_eq!(path.to_string(), expected_uri, "parsing {value}");
+        assert_eq!(
+            NativePathString::from_path_uri(&path, convention).map(NativePathString::into_string),
+            Ok(expected_native.to_string()),
+            "rendering normalized {value}"
+        );
+    }
+}
+
+#[test]
+fn native_path_string_rejects_invalid_absolute_paths() {
+    for (value, convention) in [
+        ("relative/path", PathConvention::Posix),
+        ("relative\\path", PathConvention::Windows),
+        (r"C:relative", PathConvention::Windows),
+        (r"\\server", PathConvention::Windows),
+        (r"C:\invalid?name", PathConvention::Windows),
+        (r"C:\trailing.", PathConvention::Windows),
+        (r"C:\workspace\D:\file.rs", PathConvention::Windows),
+        ("/tmp/null\0byte", PathConvention::Posix),
+        ("C:\\null\0byte", PathConvention::Windows),
+    ] {
+        assert!(matches!(
+            NativePathString::new(value).to_path_uri(convention),
+            Err(NativePathStringError::InvalidNativePath { .. })
+        ));
+    }
+}
+
+#[test]
+fn resolves_posix_paths_without_host_path_rules() {
+    let base = PathUri::parse("file:///workspace/src").expect("base URI");
+
+    for (path, expected) in [
+        ("", "file:///workspace/src"),
+        ("../README.md", "file:///workspace/README.md"),
+        ("../../../README.md", "file:///README.md"),
+        ("/tmp/output", "file:///tmp/output"),
+        (
+            r"generated\output",
+            "file:///workspace/src/generated%5Coutput",
+        ),
+    ] {
+        assert_eq!(
+            base.resolve_native(path, PathConvention::Posix),
+            Ok(PathUri::parse(expected).expect("resolved URI")),
+            "resolving {path}"
+        );
+    }
+}
+
+#[test]
+fn resolves_windows_drive_and_unc_paths_without_host_path_rules() {
+    let drive = PathUri::parse("file:///C:/workspace/src").expect("drive URI");
+    let share = PathUri::parse("file://server/share/workspace/src").expect("share URI");
+
+    for (base, path, expected) in [
+        (&drive, "", "file:///C:/workspace/src"),
+        (&drive, r"..\README.md", "file:///C:/workspace/README.md"),
+        (&drive, r"\logs\output.txt", "file:///C:/logs/output.txt"),
+        (&drive, r"D:\other\file.txt", "file:///D:/other/file.txt"),
+        (
+            &drive,
+            r"\\other\share\file.txt",
+            "file://other/share/file.txt",
+        ),
+        (
+            &share,
+            r"..\..\..\README.md",
+            "file://server/share/README.md",
+        ),
+        (
+            &share,
+            r"\logs\output.txt",
+            "file://server/share/logs/output.txt",
+        ),
+    ] {
+        assert_eq!(
+            base.resolve_native(path, PathConvention::Windows),
+            Ok(PathUri::parse(expected).expect("resolved URI")),
+            "resolving {path}"
+        );
+    }
+}
+
+#[test]
+fn relative_resolution_rejects_incompatible_and_opaque_bases() {
+    let posix = PathUri::parse("file:///workspace").expect("POSIX URI");
+    let opaque = PathUri::parse("file:///%00/bad/path/YQ").expect("opaque fallback URI");
+
+    assert!(matches!(
+        posix.resolve_native("child", PathConvention::Windows),
+        Err(NativePathStringError::IncompatibleConvention { .. })
+    ));
+    assert!(matches!(
+        opaque.resolve_native("child", PathConvention::Posix),
+        Err(NativePathStringError::OpaqueFallback { .. })
+    ));
+    assert_eq!(
+        opaque.resolve_native("/tmp", PathConvention::Posix),
+        Ok(PathUri::parse("file:///tmp").expect("absolute URI"))
+    );
+}

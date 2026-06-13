@@ -120,6 +120,9 @@
       ],
       "type": "object"
     },
+    "NativePathString": {
+      "type": "string"
+    },
     "Personality": {
       "enum": [
         "none",
@@ -171,7 +174,12 @@
     "TurnEnvironmentParams": {
       "properties": {
         "cwd": {
-          "$ref": "#/definitions/AbsolutePathBuf"
+          "allOf": [
+            {
+              "$ref": "#/definitions/NativePathString"
+            }
+          ],
+          "description": "Absolute cwd rendered using the selected environment's path convention."
         },
         "environmentId": {
           "type": "string"

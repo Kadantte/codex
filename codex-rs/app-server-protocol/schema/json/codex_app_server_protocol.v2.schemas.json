@@ -8625,6 +8625,9 @@
       "title": "ModelVerificationNotification",
       "type": "object"
     },
+    "NativePathString": {
+      "type": "string"
+    },
     "NetworkAccess": {
       "enum": [
         "restricted",
@@ -16714,7 +16717,12 @@
     "TurnEnvironmentParams": {
       "properties": {
         "cwd": {
-          "$ref": "#/definitions/AbsolutePathBuf"
+          "allOf": [
+            {
+              "$ref": "#/definitions/NativePathString"
+            }
+          ],
+          "description": "Absolute cwd rendered using the selected environment's path convention."
         },
         "environmentId": {
           "type": "string"
